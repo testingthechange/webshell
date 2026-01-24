@@ -1,0 +1,91 @@
+// Manifest URLs from work order
+const MANIFEST_URLS = {
+    project716944: 'https://album-backend-kmuo.onrender.com/publish/f6692a3b94aad73430ed55a6.json',
+    project210731: 'https://album-backend-kmuo.onrender.com/publish/a01cba9d77b073968a39219b.json'
+};
+
+// Note: No demo/fallback manifests are included in production source.
+// When a manifest loads it will be used as-is. If the manifest contains
+// no tracks or playable URLs we return an empty-tracks state so the UI
+// shows a clear "No tracks in manifest" message.
+
+/**
+ * Load manifest from real URL with fallback to mock data
+ * @param {string} projectKey - 'project716944' or 'project210731'
+ * @returns {Promise<Object>} - Manifest data
+ */
+export async function loadManifest(projectKey = 'project716944') {
+    const url = MANIFEST_URLS[projectKey];
+
+    if (!url) {
+        console.warn(`Unknown project key: ${projectKey}`);
+        return { ok: false, snapshot: { tracks: [] }, __loadError: true };
+    }
+
+    try {
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 5000); // 5s timeout
+
+        const response = await fetch(url, { signal: controller.signal });
+        clearTimeout(timeoutId);
+
+        if (!response.ok) {
+            throw new Error(`HTTP ${response.status}`);
+        }
+
+        const data = await response.json();
+
+        // Manifest may wrap album inside `snapshot`
+        const snapshot = data.snapshot ?? data;
+
+        // Normalize tracks and urls (prefer playbackUrl)
+        const tracks = Array.isArray(snapshot.tracks) ? snapshot.tracks.map(t => {
+            const trackUrl = t.playbackUrl || t.url || t.audioUrl || null;
+            return {
+                id: t.id ?? t.trackId ?? t.shareId ?? null,
+                title: t.title ?? t.name ?? t.trackTitle ?? '',
+                duration: t.duration ?? t.length ?? 0,
+                url: trackUrl
+            };
+        }) : [];
+
+        const hasPlayable = tracks.some(t => typeof t.url === 'string' && t.url.length > 0);
+
+        // Do NOT use any demo fallback once the manifest loads.
+        // If there are no playable tracks, return an explicit empty state.
+        const out = { ...data, snapshot: { ...(snapshot || {}), tracks } };
+        if (!hasPlayable) {
+            out.__noTracks = true; // UI should show "No tracks in manifest"
+        }
+
+        return out;
+    } catch (error) {
+        console.warn(`Failed to load manifest from ${url}: ${error.message}`);
+        return { ok: false, snapshot: { tracks: [] }, __loadError: true };
+    }
+}
+
+/**
+ * Load all available manifests
+ * @returns {Promise<Object>} - Object with all manifests
+ */
+export async function loadAllManifests() {
+    const results = await Promise.all([
+        loadManifest('project716944'),
+        loadManifest('project210731')
+    ]);
+
+    return {
+        project716944: results[0],
+        project210731: results[1]
+    };
+}
+
+/**
+ * Format duration from seconds to MM:SS
+ */
+export function formatDuration(seconds) {
+    const mins = Math.floor(seconds / 60);
+    const secs = Math.floor(seconds % 60);
+    return `${mins}:${secs.toString().padStart(2, '0')}`;
+}

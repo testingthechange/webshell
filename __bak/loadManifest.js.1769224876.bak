@@ -1,0 +1,169 @@
+// src/lib/loadManifest.js
+// Loader rules:
+// - Accepts:
+//   (A) a full https:// URL (loads directly)
+//   (B) a 24-hex publish shareId -> https://album-backend-kmuo.onrender.com/publish/<shareId>.json
+// - Provides:
+//   - loadManifest(keyOrUrl)
+//   - loadAllManifests()
+//   - formatDuration(seconds)  <-- PlayerBar expects this named export
+//
+// Notes:
+// - No demo fallback: if the manifest has no playable tracks, UI should show empty state upstream.
+// - Normalizes your publish JSON into a simple album model for Product/Account playback.
+
+const PUBLISH_BASE = "https://album-backend-kmuo.onrender.com/publish";
+
+// Put the shareIds you want Shop to list here.
+// (You can add/remove freely.)
+const KNOWN_SHARE_IDS = [
+  "40aecb74517369bdc6a2353e",
+  // "f6692a3b94aad73430ed55a6", // this one currently returns snapshot:{ping:true}
+];
+
+function isHttpUrl(s) {
+  return /^https?:\/\//i.test(String(s || ""));
+}
+
+function isShareId24Hex(s) {
+  return /^[a-f0-9]{24}$/i.test(String(s || "").trim());
+}
+
+function resolveManifestUrl(keyOrUrl) {
+  const v = String(keyOrUrl || "").trim();
+  if (!v) throw new Error("MISSING_PROJECT_KEY");
+
+  if (isHttpUrl(v)) return v;
+
+  // Treat 24-hex values as publish shareIds
+  if (isShareId24Hex(v)) return `${PUBLISH_BASE}/${v}.json`;
+
+  console.warn(`Unknown project key: ${v}`);
+  throw new Error(`UNKNOWN_PROJECT_KEY:${v}`);
+}
+
+async function fetchJson(url) {
+  const r = await fetch(url, { cache: "no-store" });
+  if (!r.ok) throw new Error(`Manifest HTTP ${r.status}`);
+  return r.json();
+}
+
+// Public API: returns a normalized album model for the player pages
+export async function loadManifest(keyOrUrl) {
+  const url = resolveManifestUrl(keyOrUrl);
+  const json = await fetchJson(url);
+  return normalizePublishToAlbum(json);
+}
+
+// Public API: Shop uses this to list albums
+// Returns a map: { [shareId]: { snapshot: {...}, _album: normalizedAlbum } }
+export async function loadAllManifests() {
+  const out = {};
+  for (const shareId of KNOWN_SHARE_IDS) {
+    try {
+      const json = await fetchJson(`${PUBLISH_BASE}/${shareId}.json`);
+      const album = normalizePublishToAlbum(json);
+      // Attach a few convenience fields for Shop UI
+      const snapshot = json?.snapshot && typeof json.snapshot === "object" ? json.snapshot : {};
+      out[shareId] = {
+        ...json,
+        snapshot: {
+          ...snapshot,
+          albumName: snapshot.albumName || snapshot.projectName || album.title || "Untitled Album",
+          performer: snapshot.performer || album.artist || "Unknown Artist",
+          coverUrl: snapshot.coverUrl || album.coverUrl || "",
+          price: snapshot.price || 0,
+        },
+        _album: album,
+      };
+    } catch (e) {
+      console.warn("Failed to load manifest for", shareId, e?.message || e);
+    }
+  }
+  return out;
+}
+
+// ---- Normalization (your publish JSON -> player album model) ----
+
+function normalizePublishToAlbum(json) {
+  const snapshot = json?.snapshot && typeof json.snapshot === "object" ? json.snapshot : {};
+
+  // Title/artist/cover heuristics (safe defaults)
+  const title =
+    snapshot.albumName ||
+    snapshot.projectName ||
+    snapshot.title ||
+    snapshot.albumTitle ||
+    "Untitled Album";
+
+  const artist =
+    snapshot.performer ||
+    snapshot.artist ||
+    snapshot.albumArtist ||
+    snapshot.company ||
+    "";
+
+  const coverUrl =
+    snapshot.coverUrl ||
+    snapshot.cover ||
+    snapshot.artworkUrl ||
+    snapshot.albumCoverUrl ||
+    "";
+
+  const tracks = extractTracks(snapshot);
+
+  return {
+    shareId: json?.shareId || "",
+    projectId: json?.projectId || snapshot.projectId || "",
+    title,
+    artist,
+    coverUrl,
+    tracks,
+  };
+}
+
+function extractTracks(snapshot) {
+  // 1) If snapshot.tracks already exists, use it
+  if (Array.isArray(snapshot?.tracks)) {
+    return snapshot.tracks
+      .map((t, i) => ({
+        id: t?.id ?? String(i),
+        title: t?.title || t?.name || `Track ${i + 1}`,
+        audioUrl: t?.audioUrl || t?.playbackUrl || t?.url || "",
+        duration: Number(t?.duration || t?.durationSec || 0) || 0,
+      }))
+      .filter((t) => !!t.audioUrl);
+  }
+
+  // 2) Your current real snapshot shape: snapshot.catalog.songs[*].files.album.playbackUrl
+  const songs = snapshot?.catalog?.songs;
+  if (Array.isArray(songs)) {
+    return songs
+      .map((s, i) => {
+        const audioUrl =
+          s?.files?.album?.playbackUrl ||
+          s?.files?.album?.url ||
+          s?.files?.album?.audioUrl ||
+          "";
+        return {
+          id: String(s?.slot ?? i),
+          title: (s?.titleJson?.title || s?.title || `Track ${i + 1}`).trim(),
+          audioUrl,
+          duration: 0,
+        };
+      })
+      .filter((t) => !!t.audioUrl);
+  }
+
+  // 3) Nothing usable
+  return [];
+}
+
+// ---- Utility expected by PlayerBar ----
+export function formatDuration(seconds) {
+  const s = Math.max(0, Number(seconds) || 0);
+  const m = Math.floor(s / 60);
+  const r = Math.floor(s % 60);
+  return `${m}:${String(r).padStart(2, "0")}`;
+}
+

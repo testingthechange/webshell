@@ -1,0 +1,116 @@
+import { useEffect, useState } from 'react';
+import { useParams } from 'react-router-dom';
+import { loadManifest, formatDuration } from '../lib/loadManifest';
+
+export default function Product({ onPlayTrack, currentTrack, isPlaying, playbackMode }) {
+    const { id } = useParams();
+    const [manifest, setManifest] = useState(null);
+    const [loading, setLoading] = useState(true);
+
+    useEffect(() => {
+        const projectKey = id || 'project716944';
+        loadManifest(projectKey)
+            .then(setManifest)
+            .finally(() => setLoading(false));
+    }, [id]);
+
+    if (loading) {
+        return (
+            <div style={{ textAlign: 'center', padding: '60px' }}>
+                <p style={{ color: 'var(--text-muted)' }}>Loading album...</p>
+            </div>
+        );
+    }
+
+    const snapshot = manifest?.snapshot || {};
+    const tracks = snapshot.tracks || [];
+    const isManifestIncomplete = !!manifest?.__manifestIncomplete;
+
+    const handleTrackClick = (track) => {
+        onPlayTrack(track);
+    };
+
+    const isTrackActive = (track) => {
+        return currentTrack?.id === track.id && playbackMode === 'preview';
+    };
+
+    return (
+        <div>
+            <div className="search-container" style={{ maxWidth: '100%', margin: '0 0 24px 0', padding: 0 }}>
+                <input
+                    type="text"
+                    className="search-input"
+                    placeholder="Search (Directus placeholder)..."
+                />
+            </div>
+
+            <p className="page-title">BUILD: RECEIVER-FINAL-2026-01-20</p>
+            <h1 className="page-heading">Album</h1>
+
+            <div className="layout-60-40">
+                {isManifestIncomplete && (
+                    <div style={{ background: '#fff3cd', padding: '10px 12px', borderRadius: 6, marginBottom: 12, border: '1px solid #ffeeba' }}>
+                        <strong>Demo data (manifest incomplete)</strong>
+                    </div>
+                )}
+                {/* Left Column - Cover Art (60%) */}
+                <div className="layout-left">
+                    <div className="cover-art">
+                        {snapshot.coverUrl ? (
+                            <img src={snapshot.coverUrl} alt={snapshot.albumName} />
+                        ) : (
+                            <span className="cover-art-placeholder">No coverUrl.</span>
+                        )}
+                    </div>
+                </div>
+
+                {/* Right Column - Cards (40%) */}
+                <div className="layout-right">
+                    {/* Card 1: Album Info */}
+                    <div className="card album-info">
+                        <div className="card-header">Album Info</div>
+                        <div className="album-name">{snapshot.albumName || 'Album'}</div>
+                        <div className="album-performer">{snapshot.performer || 'Performer'}</div>
+                        <div className="album-date">{snapshot.releaseDate || '—'}</div>
+                    </div>
+
+                    {/* Card 2: Buy Button */}
+                    <div className="card">
+                        <button className="buy-button">
+                            Buy — ${(snapshot.price || 19.50).toFixed(2)}
+                        </button>
+                    </div>
+
+                    {/* Card 3: Marketing Info */}
+                    <div className="card marketing-info">
+                        <h4>What you get</h4>
+                        <ul>
+                            <li>Full album access</li>
+                            <li>Smart bridge playback</li>
+                            <li>Authored transitions</li>
+                            <li>MP3 download</li>
+                        </ul>
+                    </div>
+
+                    {/* Card 4: Tracks */}
+                    <div className="card">
+                        <div className="card-header">Tracks</div>
+                        <div className="track-list">
+                            {tracks.map((track, index) => (
+                                <div
+                                    key={track.id}
+                                    className={`track-item ${isTrackActive(track) ? 'active' : ''}`}
+                                    onClick={() => handleTrackClick(track)}
+                                >
+                                    <span className="track-number">{index + 1}.</span>
+                                    <span className="track-name">{track.name}</span>
+                                    <span className="track-duration">{formatDuration(track.duration)}</span>
+                                </div>
+                            ))}
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    );
+}

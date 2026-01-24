@@ -1,0 +1,221 @@
+import { useEffect, useState } from 'react';
+import { loadManifest, formatDuration } from '../lib/loadManifest';
+
+export default function Account({ onPlayTrack, currentTrack, isPlaying, playbackMode }) {
+    const [manifest, setManifest] = useState(null);
+    const [loading, setLoading] = useState(true);
+    const [activeNav, setActiveNav] = useState('collection');
+    const [selectedPlaylist, setSelectedPlaylist] = useState(null);
+
+    useEffect(() => {
+        loadManifest('project716944')
+            .then(setManifest)
+            .finally(() => setLoading(false));
+    }, []);
+
+    if (loading) {
+        return (
+            <div style={{ textAlign: 'center', padding: '60px' }}>
+                <p style={{ color: 'var(--text-muted)' }}>Loading account...</p>
+            </div>
+        );
+    }
+
+    const snapshot = manifest?.snapshot || {};
+    const tracks = snapshot.tracks || [];
+    const isManifestIncomplete = !!manifest?.__manifestIncomplete;
+
+    const handleTrackClick = (track) => {
+        // Indicate this originates from a direct user click so player can
+        // attempt to call play() synchronously (improves autoplay behavior).
+        onPlayTrack(track, 'full', true);
+    };
+
+    const isTrackActive = (track) => {
+        return currentTrack?.id === track.id && playbackMode === 'full';
+    };
+
+    // Content for each nav section
+    const renderContent = () => {
+        switch (activeNav) {
+            case 'collection':
+                return (
+                    <div className="track-list">
+                        {tracks.map((track, index) => (
+                            <div
+                                key={track.id}
+                                className={`track-item ${isTrackActive(track) ? 'active' : ''}`}
+                                onClick={() => handleTrackClick(track)}
+                            >
+                                <span className="track-number">{index + 1}.</span>
+                                <span className="track-name">{track.name}</span>
+                                <span className="track-duration">{formatDuration(track.duration)}</span>
+                            </div>
+                        ))}
+                    </div>
+                );
+            case 'playlist':
+                // Simple playlist UI: clicking a playlist opens its tracks.
+                // Favorites uses the first 3 tracks from snapshot as demo.
+                return (
+                    <div style={{ color: 'var(--text-secondary)', fontSize: '14px' }}>
+                        {!selectedPlaylist ? (
+                            <>
+                                <div
+                                    style={{ marginBottom: '12px', padding: '12px', background: 'var(--bg-secondary)', borderRadius: '8px', cursor: 'pointer' }}
+                                    onClick={() => setSelectedPlaylist('favorites')}
+                                >
+                                    📁 Favorites <span style={{ color: 'var(--text-muted', marginLeft: '8px' }}>3 tracks</span>
+                                </div>
+
+                                <div
+                                    style={{ marginBottom: '12px', padding: '12px', background: 'var(--bg-secondary)', borderRadius: '8px', cursor: 'pointer' }}
+                                    onClick={() => setSelectedPlaylist('chill')}
+                                >
+                                    📁 Chill Vibes <span style={{ color: 'var(--text-muted)', marginLeft: '8px' }}>0 tracks</span>
+                                </div>
+
+                                <div style={{ padding: '12px', background: 'var(--bg-secondary)', borderRadius: '8px', border: '1px dashed var(--border-color)', cursor: 'pointer' }}>
+                                    + Create New Playlist
+                                </div>
+                            </>
+                        ) : (
+                            <div>
+                                <button onClick={() => setSelectedPlaylist(null)} style={{ marginBottom: 12 }}>← Back to playlists</button>
+                                <div style={{ marginTop: 8 }}>
+                                    <h4 style={{ margin: '6px 0' }}>{selectedPlaylist === 'favorites' ? 'Favorites' : 'Playlist'}</h4>
+                                    <div>
+                                        {(selectedPlaylist === 'favorites' ? (tracks || []).slice(0, 3) : []).map((track, i) => (
+                                            <div key={track.id || i} className="track-item" style={{ padding: '8px 0', cursor: 'pointer' }} onClick={() => handleTrackClick(track)}>
+                                                <span style={{ marginRight: 8 }}>{i + 1}.</span>
+                                                <span style={{ marginRight: 12 }}>{track.name}</span>
+                                                <span style={{ color: 'var(--text-muted)' }}>{formatDuration(track.duration)}</span>
+                                            </div>
+                                        ))}
+                                        {(selectedPlaylist === 'favorites' && (tracks || []).length === 0) && (
+                                            <div style={{ color: 'var(--text-muted)' }}>No tracks in this playlist.</div>
+                                        )}
+                                    </div>
+                                </div>
+                            </div>
+                        )}
+                    </div>
+                );
+            case 'settings':
+                return (
+                    <div style={{ color: 'var(--text-secondary)', fontSize: '14px' }}>
+                        <div style={{ padding: '12px 0', borderBottom: '1px solid var(--border-color)', display: 'flex', justifyContent: 'space-between' }}>
+                            <span>Audio Quality</span>
+                            <span style={{ color: 'var(--accent-primary)' }}>High (320kbps)</span>
+                        </div>
+                        <div style={{ padding: '12px 0', borderBottom: '1px solid var(--border-color)', display: 'flex', justifyContent: 'space-between' }}>
+                            <span>Download Location</span>
+                            <span style={{ color: 'var(--text-muted)' }}>~/Music</span>
+                        </div>
+                        <div style={{ padding: '12px 0', display: 'flex', justifyContent: 'space-between' }}>
+                            <span>Notifications</span>
+                            <span style={{ color: 'var(--accent-primary)' }}>On</span>
+                        </div>
+                    </div>
+                );
+            case 'other':
+                return (
+                    <div style={{ color: 'var(--text-secondary)', fontSize: '14px' }}>
+                        <p style={{ marginBottom: '16px' }}>Need help with Block Radius?</p>
+                        <div style={{ padding: '12px', background: 'var(--bg-secondary)', borderRadius: '8px', marginBottom: '8px' }}>
+                            📧 support@blockradius.com
+                        </div>
+                        <div style={{ padding: '12px', background: 'var(--bg-secondary)', borderRadius: '8px' }}>
+                            📖 View Documentation
+                        </div>
+                    </div>
+                );
+            default:
+                return null;
+        }
+    };
+
+    // Get the title for current section
+    const getSectionTitle = () => {
+        switch (activeNav) {
+            case 'collection': return 'Tracks';
+            case 'playlist': return 'Playlists';
+            case 'settings': return 'Settings';
+            case 'other': return 'Help & Support';
+            default: return '';
+        }
+    };
+
+    return (
+        <div>
+            {isManifestIncomplete && (
+                <div style={{ background: '#fff3cd', padding: '10px 12px', borderRadius: 6, marginBottom: 12, border: '1px solid #ffeeba' }}>
+                    <strong>Demo data (manifest incomplete)</strong>
+                </div>
+            )}
+            <p className="page-title">My Library</p>
+            <h1 className="page-heading">Account</h1>
+
+            <div className="layout-60-40">
+                {/* Left Column - Cover Art (60%) */}
+                <div className="layout-left">
+                    <div className="cover-art">
+                        {snapshot.coverUrl ? (
+                            <img src={snapshot.coverUrl} alt={snapshot.albumName} />
+                        ) : (
+                            <span className="cover-art-placeholder">No coverUrl.</span>
+                        )}
+                    </div>
+                </div>
+
+                {/* Right Column - Cards (40%) */}
+                <div className="layout-right">
+                    {/* Card 1: Album Info */}
+                    <div className="card album-info">
+                        <div className="card-header">Album Info</div>
+                        <div className="album-name">{snapshot.albumName || 'Album'}</div>
+                        <div className="album-performer">{snapshot.performer || 'Performer'}</div>
+                        <div className="album-date">{snapshot.releaseDate || '—'}</div>
+                    </div>
+
+                    {/* Card 2: Combined Nav + Content */}
+                    <div className="card">
+                        <div className="card-header">Navigation</div>
+                        <div className="mini-nav" style={{ marginBottom: '16px' }}>
+                            <button
+                                className={`mini-nav-item ${activeNav === 'collection' ? 'active' : ''}`}
+                                onClick={() => setActiveNav('collection')}
+                            >
+                                My Collection
+                            </button>
+                            <button
+                                className={`mini-nav-item ${activeNav === 'playlist' ? 'active' : ''}`}
+                                onClick={() => setActiveNav('playlist')}
+                            >
+                                Playlist
+                            </button>
+                            <button
+                                className={`mini-nav-item ${activeNav === 'settings' ? 'active' : ''}`}
+                                onClick={() => setActiveNav('settings')}
+                            >
+                                Settings
+                            </button>
+                            <button
+                                className={`mini-nav-item ${activeNav === 'other' ? 'active' : ''}`}
+                                onClick={() => setActiveNav('other')}
+                            >
+                                Other
+                            </button>
+                        </div>
+
+                        {/* Content Section - Now inside same card */}
+                        <div style={{ borderTop: '1px solid var(--border-color)', paddingTop: '16px' }}>
+                            <div className="card-header">{getSectionTitle()}</div>
+                            {renderContent()}
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    );
+}

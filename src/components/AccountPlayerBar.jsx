@@ -1,19 +1,23 @@
 import { useEffect, useRef, useState } from "react";
 import { formatDuration } from "../lib/loadManifest.js";
 
-const PREVIEW_CAP_SECONDS = 40;
-
 const DEFAULT_API_BASE =
   String(import.meta?.env?.VITE_API_BASE || "").trim().replace(/\/+$/, "") ||
   "https://album-backend-kmuo.onrender.com";
 
-export default function PlayerBar({
+/**
+ * AccountPlayerBar (ACCOUNT ONLY)
+ * - Own copy of playback logic so Account changes cannot break Product.
+ * - Same signed-url + autoplay ordering fix.
+ * - No preview cap.
+ */
+export default function AccountPlayerBar({
   audioRef,
   currentTrack,
   isPlaying,
   currentTime,
   duration,
-  playbackMode,
+  playbackMode = "full",
   onPlay,
   onPause,
   onTimeUpdate,
@@ -29,8 +33,6 @@ export default function PlayerBar({
     playError: "",
   });
 
-  // Only PlayerBar should ever touch <audio>. App controls state only.
-  // Track change -> fetch signed url -> set audio.src (do NOT call pause here)
   useEffect(() => {
     const audio = actualRef.current;
     if (!audio || !currentTrack) return;
@@ -56,18 +58,27 @@ export default function PlayerBar({
 
         if (cancelled) return;
 
-        // Setting src + load is fine. Do NOT call pause() here.
-        // Autoplay is handled by the isPlaying effect below.
-        if (audio.src !== signedUrl) {
+        const srcChanged = audio.src !== signedUrl;
+
+        if (srcChanged) {
           audio.src = signedUrl;
           audio.currentTime = 0;
           if (typeof onTimeUpdate === "function") onTimeUpdate(0);
           if (typeof audio.load === "function") audio.load();
         }
+
+        if (isPlaying) {
+          audio.play().catch((e) => {
+            if (cancelled) return;
+            setDebug((d) => ({
+              ...d,
+              playError: String(e?.name || "") + ":" + String(e?.message || e),
+            }));
+          });
+        }
       } catch (e) {
         if (cancelled) return;
         setDebug((d) => ({ ...d, playError: String(e?.message || e) }));
-        // IMPORTANT: do NOT call audio.pause() here (this is what causes the play/pause race)
       }
     })();
 
@@ -75,9 +86,8 @@ export default function PlayerBar({
       cancelled = true;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [currentTrack?.id, currentTrack?.s3Key]);
+  }, [currentTrack?.id, currentTrack?.s3Key, isPlaying]);
 
-  // Audio event wiring
   useEffect(() => {
     const audio = actualRef.current;
     if (!audio) return;
@@ -85,15 +95,6 @@ export default function PlayerBar({
     const handleTimeUpdate = () => {
       const t = audio.currentTime || 0;
       if (typeof onTimeUpdate === "function") onTimeUpdate(t);
-
-      if (playbackMode === "preview" && t >= PREVIEW_CAP_SECONDS) {
-        // Preview cap is the ONLY automatic pause path.
-        try {
-          audio.pause();
-        } catch {}
-        if (typeof onPause === "function") onPause(); // keep UI state consistent
-        if (typeof onTrackEnd === "function") onTrackEnd();
-      }
     };
 
     const handleLoadedMetadata = () => {
@@ -114,17 +115,13 @@ export default function PlayerBar({
       audio.removeEventListener("loadedmetadata", handleLoadedMetadata);
       audio.removeEventListener("ended", handleEnded);
     };
-  }, [actualRef, playbackMode, onTimeUpdate, onDurationChange, onTrackEnd, onPause]);
+  }, [actualRef, onTimeUpdate, onDurationChange, onTrackEnd, onPause]);
 
-  // Single authoritative play/pause effect.
-  // This avoids "play() interrupted by pause()" by ensuring pause only happens
-  // when isPlaying flips false (or preview cap / ended handlers).
   useEffect(() => {
     const audio = actualRef.current;
     if (!audio) return;
 
     if (!currentTrack) {
-      // No track: keep quiet, but don't race.
       try {
         audio.pause();
       } catch {}
@@ -132,9 +129,11 @@ export default function PlayerBar({
     }
 
     if (isPlaying) {
-      // If src isn't ready yet, this might reject; that's OK.
       audio.play().catch((e) => {
-        setDebug((d) => ({ ...d, playError: String(e?.name || "") + ":" + String(e?.message || e) }));
+        setDebug((d) => ({
+          ...d,
+          playError: String(e?.name || "") + ":" + String(e?.message || e),
+        }));
       });
     } else {
       try {
@@ -143,11 +142,7 @@ export default function PlayerBar({
     }
   }, [isPlaying, currentTrack?.id, actualRef]);
 
-  const maxDuration =
-    playbackMode === "preview"
-      ? Math.min(duration || PREVIEW_CAP_SECONDS, PREVIEW_CAP_SECONDS)
-      : duration || 0;
-
+  const maxDuration = duration || 0;
   const progressPercent = maxDuration > 0 ? (currentTime / maxDuration) * 100 : 0;
 
   const handleProgressClick = (e) => {
@@ -197,10 +192,7 @@ export default function PlayerBar({
           {formatDuration(currentTime)} / {formatDuration(maxDuration)}
         </span>
 
-        <div style={{ fontSize: 11, opacity: 0.65, marginTop: 6 }}>
-          <div>DEBUG s3Key: {debug.lastS3Key || "—"}</div>
-          <div>DEBUG playError: {debug.playError || "—"}</div>
-        </div>
+        <div style={{ fontSize: 11, opacity: 0.65, marginTop: 6 }} />
       </div>
     </div>
   );

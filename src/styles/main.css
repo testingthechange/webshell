@@ -12,15 +12,15 @@
   --accent-secondary: #5eead4;
   --border-color: #2a2a3a;
   --player-bg: #0d0d14;
-  
+
   /* Typography */
   --font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-  
+
   /* Spacing */
   --header-height: 60px;
   --player-height: 80px;
   --content-padding: 24px;
-  
+
   /* Transitions */
   --transition-fast: 150ms ease;
   --transition-normal: 250ms ease;
@@ -110,13 +110,15 @@ html, body {
 /* Search Bar */
 .search-container {
   width: 100%;
-  max-width: 600px;
   margin: 20px auto;
   padding: 0 var(--content-padding);
 }
 
+/* Force the input itself to be smaller + centered (works even if container stretches) */
 .search-input {
-  width: 100%;
+  width: min(360px, 40vw);
+  display: block;
+  margin: 0 auto;
   background: var(--bg-card);
   border: 1px solid var(--border-color);
   border-radius: 8px;
@@ -290,7 +292,7 @@ html, body {
 
 .track-item.active {
   background: var(--bg-card-hover);
-  border-left: 3px solid var(--accent-primary);
+  border-left: none;
 }
 
 .track-number {
@@ -336,7 +338,101 @@ html, body {
   color: var(--text-primary);
 }
 
-/* Player Bar */
+/* Mini Nav Row */
+.mini-nav-row {
+  display: flex;
+  gap: 8px;
+  width: 100%;
+}
+
+.mini-nav-row .mini-nav-item {
+  flex: 1;
+  text-align: center;
+  border: none;
+}
+
+/* Thumbnail Row (My Collection) */
+.thumb-row {
+  max-width: 1200px;
+  margin: 0 auto;
+  display: flex;
+  gap: 12px;
+  overflow-x: auto;
+  padding: 6px 2px;
+}
+
+.thumb-row::-webkit-scrollbar {
+  height: 8px;
+}
+
+.thumb-row::-webkit-scrollbar-thumb {
+  background: var(--border-color);
+  border-radius: 999px;
+}
+
+.thumb-item {
+  flex: 0 0 auto;
+  width: 200px;
+  background: var(--bg-card);
+  border: 1px solid var(--border-color);
+  border-radius: 12px;
+  padding: 10px;
+  cursor: pointer;
+  text-align: left;
+  transition: transform var(--transition-fast), border-color var(--transition-fast), background var(--transition-fast);
+}
+
+.thumb-item:hover {
+  transform: translateY(-1px);
+  background: var(--bg-card-hover);
+}
+
+.thumb-item.active {
+  border-color: var(--accent-primary);
+}
+
+.thumb-img {
+  width: 100%;
+  aspect-ratio: 1.6 / 1;
+  border-radius: 10px;
+  overflow: hidden;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-color);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.thumb-img img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.thumb-placeholder {
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.thumb-meta {
+  margin-top: 10px;
+}
+
+.thumb-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+  line-height: 1.2;
+  margin-bottom: 4px;
+}
+
+.thumb-artist {
+  font-size: 12px;
+  color: var(--text-secondary);
+  line-height: 1.2;
+}
+
+/* Player Bar (legacy classes kept; component now uses bb-player namespace) */
 .player-bar {
   position: fixed;
   bottom: 0;
@@ -422,6 +518,112 @@ html, body {
   color: var(--text-muted);
   min-width: 80px;
   text-align: right;
+}
+
+/* =========================================================
+   BB Player Namespace (prevents global CSS collisions)
+   PlayerBar.jsx uses these classes.
+   ========================================================= */
+.bb-player.player-bar {
+  position: fixed;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  height: var(--player-height);
+  background: var(--player-bg);
+  border-top: 1px solid var(--border-color);
+  display: flex;
+  align-items: center;
+  padding: 0 var(--content-padding);
+  z-index: 200;
+}
+
+.bb-player__controls {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.bb-player__btn {
+  background: none;
+  border: none;
+  color: var(--text-primary);
+  cursor: pointer;
+  padding: 8px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: background var(--transition-fast);
+}
+
+.bb-player__btn:hover {
+  background: var(--bg-card);
+}
+
+.bb-player__btn[data-active="1"] {
+  background: var(--bg-card);
+}
+
+.bb-player__btn--play {
+  width: 40px;
+  height: 40px;
+  background: var(--text-primary);
+  color: var(--bg-primary);
+}
+
+.bb-player__btn--play:hover {
+  background: var(--text-secondary);
+}
+
+.bb-player__progress {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 0 24px;
+}
+
+.bb-player__now {
+  min-width: 150px;
+  text-align: center;
+}
+
+.bb-player__nowLabel {
+  font-size: 11px;
+  opacity: 0.7;
+  line-height: 1.1;
+}
+
+.bb-player__nowTitle {
+  line-height: 1.1;
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--text-primary);
+}
+
+.bb-player__bar {
+  flex: 1;
+  height: 4px;
+  background: var(--bg-card);
+  border-radius: 2px;
+  cursor: pointer;
+  position: relative;
+  max-width: 520px;
+}
+
+.bb-player__fill {
+  height: 100%;
+  background: var(--accent-primary);
+  border-radius: 2px;
+  transition: width 100ms linear;
+}
+
+.bb-player__time {
+  font-size: 12px;
+  color: var(--text-muted);
+  min-width: 120px;
+  text-align: center;
 }
 
 /* Page Title */
@@ -521,20 +723,74 @@ html, body {
   .layout-60-40 {
     grid-template-columns: 1fr;
   }
-  
+
   .header-nav {
     gap: 16px;
   }
-  
+
   .search-container {
+    width: 100%;
+    max-width: none;
+    min-width: 0;
     padding: 0 16px;
   }
-  
+
+  /* On mobile, make it full width again */
+  .search-input {
+    width: 100%;
+    margin: 0;
+  }
+
   .main-content {
     padding: 16px;
   }
-  
+
   .home-hero h1 {
     font-size: 32px;
   }
+
+  .mini-nav-row {
+    flex-direction: column;
+  }
+
+  .thumb-item {
+    width: 170px;
+  }
+
+  .bb-player__bar {
+    max-width: none;
+  }
+/* Shop has no player, so remove the reserved bottom space */
+.no-player-pad {
+  padding-bottom: var(--content-padding) !important;
+}
+
+/* =========================================================
+   Account Page — My Collection thumbnails (20% smaller)
+   Scope: ONLY inside Account layout (layout-60-40)
+   ========================================================= */
+
+.layout-60-40 .thumb-item {
+  width: 160px;           /* was 200px → ~20% smaller */
+  padding: 8px;
+  opacity: 0.92;
+}
+
+.layout-60-40 .thumb-img {
+  aspect-ratio: 1.8 / 1; /* slightly flatter, less dominant */
+}
+
+.layout-60-40 .thumb-item:hover {
+  opacity: 1;
+}
+
+/* --- TEMP: disable Repeat + Shuffle everywhere (remove later when re-adding) --- */
+/* Works even if buttons are rendered by shared player chrome. */
+button[aria-label*="repeat" i],
+button[aria-label*="shuffle" i],
+button[data-action="repeat"],
+button[data-action="shuffle"],
+[data-action="repeat"],
+[data-action="shuffle"] {
+  display: none !important;
 }

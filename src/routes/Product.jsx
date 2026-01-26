@@ -1,28 +1,46 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+/* ======================================================================
+   FILE: src/routes/Product.jsx
+   PURPOSE:
+   - Two-column Product layout
+   - Loads manifest via loadManifest(shareId)
+   - Signs cover via /api/playback-url using manifest.coverS3Key
+   - PlayerBar bottom only
+   ====================================================================== */
+
+import { useEffect, useRef, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import ProductPlayerBar from "../components/ProductPlayerBar.jsx";
-import { loadManifest } from "../lib/loadManifest.js";
+import loadManifest from "../lib/loadManifest.js";
 
-/*
-  PRODUCT PAGE — ISOLATED & STRICT
-  Column rules:
-  - Column 1: cover only
-  - Column 2: meta → buy → marketing → tracks
-  - Player: bottom only
-*/
+const API_BASE =
+  String(import.meta?.env?.VITE_API_BASE || "").trim().replace(/\/+$/, "") ||
+  "https://album-backend-kmuo.onrender.com";
+
+/* ---------------- helpers ---------------- */
+
+async function signUrl(s3Key) {
+  const key = String(s3Key || "").trim();
+  if (!key) return "";
+  const r = await fetch(`${API_BASE}/api/playback-url?s3Key=${encodeURIComponent(key)}`, {
+    cache: "no-store",
+  });
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok || !j?.ok) return "";
+  return String(j?.url || j?.playbackUrl || "");
+}
+
+function pickTracks(m) {
+  if (!m) return [];
+  if (Array.isArray(m?.tracks)) return m.tracks;
+  if (Array.isArray(m?.album?.tracks)) return m.album.tracks;
+  return [];
+}
 
 function Section({ title, children, right }) {
   return (
-    <div
-      style={{
-        padding: 18,
-        borderRadius: 20,
-        border: "1px solid rgba(255,255,255,0.12)",
-        background: "rgba(255,255,255,0.03)",
-      }}
-    >
+    <div style={sectionStyle}>
       {title ? (
-        <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 12 }}>
+        <div style={sectionHeader}>
           <div style={{ fontWeight: 900, fontSize: 16 }}>{title}</div>
           {right || null}
         </div>
@@ -32,17 +50,12 @@ function Section({ title, children, right }) {
   );
 }
 
+/* ---------------- component ---------------- */
+
 export default function Product() {
   const { shareId } = useParams();
   const nav = useNavigate();
   const audioRef = useRef(null);
-
-  const API_BASE = useMemo(() => {
-    return (
-      String(import.meta?.env?.VITE_API_BASE || "").trim().replace(/\/+$/, "") ||
-      "https://album-backend-kmuo.onrender.com"
-    );
-  }, []);
 
   const [manifest, setManifest] = useState(null);
   const [error, setError] = useState("");
@@ -60,7 +73,7 @@ export default function Product() {
   useEffect(() => {
     let cancelled = false;
 
-    async function run() {
+    (async () => {
       try {
         setError("");
         setManifest(null);
@@ -75,61 +88,30 @@ export default function Product() {
         const m = await loadManifest(shareId);
         if (cancelled) return;
 
-        const list =
-          Array.isArray(m?.tracks) ? m.tracks : Array.isArray(m?.album?.tracks) ? m.album.tracks : [];
-
         setManifest(m);
+
+        const list = pickTracks(m);
         setTracks(list);
 
         if (list.length) {
           setCurrentIndex(0);
           setCurrentTrack(list[0]);
         }
+
+        const coverKey = String(m?.coverS3Key || "").trim();
+        if (coverKey) {
+          const url = await signUrl(coverKey);
+          if (!cancelled) setCoverUrl(url || "");
+        }
       } catch (e) {
         if (!cancelled) setError(String(e?.message || e));
       }
-    }
+    })();
 
-    run();
     return () => {
       cancelled = true;
     };
   }, [shareId]);
-
-  // Cover: always sign from coverS3Key (previewUrl expires)
-  useEffect(() => {
-    let cancelled = false;
-
-    async function loadCover() {
-      try {
-        const s3Key = String(manifest?.coverS3Key || "").trim();
-        if (!s3Key) {
-          // fallback only if someone provided a stable URL
-          const fallback = String(manifest?.coverUrl || "").trim();
-          setCoverUrl(fallback);
-          return;
-        }
-
-        const endpoint = `${API_BASE}/api/playback-url?s3Key=${encodeURIComponent(s3Key)}`;
-        const r = await fetch(endpoint, { cache: "no-store" });
-        const j = await r.json().catch(() => ({}));
-        if (!r.ok || !j?.ok) throw new Error(j?.error || `COVER_HTTP_${r.status}`);
-
-        const url = String(j?.url || j?.playbackUrl || "").trim();
-        if (!url) throw new Error("COVER_URL_MISSING");
-
-        if (!cancelled) setCoverUrl(url);
-      } catch {
-        // leave blank; UI still works
-        if (!cancelled) setCoverUrl("");
-      }
-    }
-
-    loadCover();
-    return () => {
-      cancelled = true;
-    };
-  }, [manifest?.coverS3Key, manifest?.coverUrl, API_BASE]);
 
   function selectTrack(index) {
     const t = tracks[index];
@@ -166,72 +148,52 @@ export default function Product() {
 
   return (
     <div style={{ width: "70%", maxWidth: 1320, margin: "0 auto", padding: "28px 0" }}>
-      {error ? (
+      {error && (
         <Section title="Error">
-          <div>{error}</div>
+          <div style={{ opacity: 0.85, whiteSpace: "pre-wrap" }}>{error}</div>
         </Section>
-      ) : null}
+      )}
 
       <div style={{ display: "grid", gridTemplateColumns: "60% 40%", gap: 32 }}>
         {/* COLUMN ONE — COVER ONLY */}
         <div>
-          <div
-            style={{
-              width: "100%",
-              aspectRatio: "1 / 1",
-              borderRadius: 24,
-              overflow: "hidden",
-              border: "1px solid rgba(255,255,255,0.12)",
-              background: "rgba(255,255,255,0.02)",
-            }}
-          >
+          <div style={coverBox}>
             {coverUrl ? (
               <img
                 src={coverUrl}
                 alt="Cover"
-                style={{ width: "100%", height: "100%", objectFit: "cover" }}
+                style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }}
               />
-            ) : null}
+            ) : (
+              <div style={coverPlaceholder}>COVER</div>
+            )}
           </div>
         </div>
 
         {/* COLUMN TWO — META → BUY → MARKETING → TRACKS */}
         <div style={{ display: "flex", flexDirection: "column", gap: 22 }}>
           <Section title={title}>
-            {artist ? <div style={{ opacity: 0.7 }}>{artist}</div> : null}
-            {description ? <div style={{ marginTop: 10, lineHeight: 1.6 }}>{description}</div> : null}
+            {artist && <div style={{ opacity: 0.7 }}>{artist}</div>}
+            {description && <div style={{ marginTop: 10, lineHeight: 1.6 }}>{description}</div>}
           </Section>
 
           <Section title="Buy" right={price ? <span>{price}</span> : null}>
-            <button
-              type="button"
-              onClick={goToCheckout}
-              style={{
-                width: "100%",
-                padding: "14px",
-                borderRadius: 14,
-                background: "linear-gradient(180deg, #00d084, #00b36b)",
-                color: "#041b12",
-                fontWeight: 900,
-                border: "none",
-                cursor: "pointer",
-              }}
-            >
+            <button type="button" onClick={goToCheckout} style={buyBtn}>
               Buy (beta)
             </button>
           </Section>
 
           <Section title="Why You’ll Love This">
             <div style={{ lineHeight: 1.6 }}>
-              Exclusive release. High-quality masters. Seamless playback experience. Support the artist
-              directly and unlock the full album.
+              Exclusive release. High-quality masters. Seamless playback experience.
+              Support the artist directly and unlock the full album.
             </div>
           </Section>
 
           <Section title="Tracks">
             {tracks.map((t, i) => (
               <button
-                key={t?.id || t?.trackId || t?.s3Key || i}
+                key={t?.id || t?.s3Key || i}
                 onClick={() => selectTrack(i)}
                 style={{
                   width: "100%",
@@ -240,13 +202,12 @@ export default function Product() {
                   marginBottom: 8,
                   borderRadius: 14,
                   border: "1px solid rgba(255,255,255,0.14)",
-                  background:
-                    i === currentIndex ? "rgba(255,255,255,0.14)" : "rgba(255,255,255,0.04)",
+                  background: i === currentIndex ? "rgba(255,255,255,0.14)" : "rgba(255,255,255,0.04)",
                   color: "#fff",
                   cursor: "pointer",
                 }}
               >
-                {i + 1}. {t?.title || t?.name || `Track ${i + 1}`}
+                {i + 1}. {t?.title || t?.name}
               </button>
             ))}
           </Section>
@@ -279,3 +240,52 @@ export default function Product() {
     </div>
   );
 }
+
+/* ---------------- styles ---------------- */
+
+const sectionStyle = {
+  padding: 18,
+  borderRadius: 20,
+  border: "1px solid rgba(255,255,255,0.12)",
+  background: "rgba(255,255,255,0.03)",
+};
+
+const sectionHeader = {
+  display: "flex",
+  justifyContent: "space-between",
+  marginBottom: 12,
+};
+
+const coverBox = {
+  width: "100%",
+  aspectRatio: "1 / 1",
+  borderRadius: 24,
+  overflow: "hidden",
+  border: "1px solid rgba(255,255,255,0.12)",
+  background: "rgba(255,255,255,0.05)",
+  display: "flex",
+  alignItems: "center",
+  justifyContent: "center",
+};
+
+const coverPlaceholder = {
+  width: "100%",
+  height: "100%",
+  display: "flex",
+  alignItems: "center",
+  justifyContent: "center",
+  letterSpacing: 2,
+  opacity: 0.55,
+  fontSize: 14,
+};
+
+const buyBtn = {
+  width: "100%",
+  padding: "14px",
+  borderRadius: 14,
+  background: "linear-gradient(180deg, #00d084, #00b36b)",
+  color: "#041b12",
+  fontWeight: 900,
+  border: "none",
+  cursor: "pointer",
+};

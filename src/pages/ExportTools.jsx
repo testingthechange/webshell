@@ -2,16 +2,27 @@ import React, { useMemo, useState } from "react";
 import { useParams } from "react-router-dom";
 
 function safeParse(json) {
-  try { return JSON.parse(json); } catch { return null; }
+  try {
+    return JSON.parse(json);
+  } catch {
+    return null;
+  }
 }
-function safeString(v) { return String(v ?? "").trim(); }
 
-function projectKey(projectId) { return `project_${projectId}`; }
+function safeString(v) {
+  return String(v ?? "").trim();
+}
+
+function projectKey(projectId) {
+  return `project_${projectId}`;
+}
+
 function loadProjectLocal(projectId) {
   const raw = localStorage.getItem(projectKey(projectId));
   const parsed = raw ? safeParse(raw) : null;
   return parsed && typeof parsed === "object" ? parsed : null;
 }
+
 function saveProjectLocal(projectId, obj) {
   localStorage.setItem(projectKey(projectId), JSON.stringify(obj || {}));
 }
@@ -19,11 +30,13 @@ function saveProjectLocal(projectId, obj) {
 function indexKey(producerId) {
   return `sb:projects_index:${String(producerId || "no-producer")}`;
 }
+
 function loadProjectsIndex(producerId) {
   const raw = localStorage.getItem(indexKey(producerId));
   const parsed = raw ? safeParse(raw) : null;
   return Array.isArray(parsed) ? parsed : [];
 }
+
 function saveProjectsIndex(producerId, rows) {
   localStorage.setItem(indexKey(producerId), JSON.stringify(Array.isArray(rows) ? rows : []));
 }
@@ -31,12 +44,14 @@ function saveProjectsIndex(producerId, rows) {
 function normalizeSnapshotKey(k) {
   const s = safeString(k);
   if (!s) return "";
-  if (s.startsWith("masterSnapshot_")) return ""; // not real S3 key
+  // masterSnapshot_* is NOT a real S3 key; ignore it
+  if (s.startsWith("masterSnapshot_")) return "";
   return s;
 }
 
 function savePublishResultToLocal({ projectId, producerId, snapshotKey, shareId, publicUrl, manifestKey }) {
   if (!projectId) return;
+
   const nowIso = new Date().toISOString();
 
   const proj = loadProjectLocal(projectId);
@@ -88,14 +103,18 @@ export default function ExportTools() {
   const proj = useMemo(() => (projectId ? loadProjectLocal(projectId) : null), [projectId, result]);
   const producerId = safeString(proj?.producerId);
 
-  const published = useMemo(() => (proj ? proj.publish || null : null), [proj]);
+  const published = useMemo(() => {
+    if (!proj) return null;
+    return proj.publish || null;
+  }, [proj]);
 
   const doPublish = async () => {
     if (!projectId) return;
 
     if (!API_BASE) {
       return window.alert(
-        "Missing VITE_API_BASE.\nExample:\nVITE_API_BASE=https://album-backend-kmuo.onrender.com"
+        "Missing VITE_API_BASE.\n" +
+          "Example:\nVITE_API_BASE=https://album-backend-kmuo.onrender.com"
       );
     }
 
@@ -104,7 +123,7 @@ export default function ExportTools() {
     setResult(null);
 
     try {
-      // Option A: always publish latest. Backend uses producer_returns/latest.json
+      // ✅ Always publish latest (backend uses producer_returns/latest.json)
       const body = { projectId };
 
       const r = await fetch(`${API_BASE}/api/publish-minisite`, {
@@ -140,7 +159,9 @@ export default function ExportTools() {
 
   return (
     <div style={{ maxWidth: 1100 }}>
-      <div style={{ fontSize: 24, fontWeight: 900, color: "#0f172a" }}>Export / Tools</div>
+      <div style={{ fontSize: 24, fontWeight: 900, color: "#0f172a" }}>
+        Export / Tools (OPTION A BUILD)
+      </div>
       <div style={{ marginTop: 6, fontSize: 12, opacity: 0.75 }}>
         Project ID: <code>{projectId}</code>
       </div>
@@ -198,15 +219,20 @@ export default function ExportTools() {
   );
 }
 
+/* ---------- styles ---------- */
+
 function card() {
   return { background: "#fff", border: "1px solid #e5e7eb", borderRadius: 12, padding: 16 };
 }
+
 function label() {
   return { fontSize: 12, fontWeight: 900, opacity: 0.65, textTransform: "uppercase" };
 }
+
 function valueMono() {
   return { fontSize: 13, fontFamily: "monospace", opacity: 0.9 };
 }
+
 function primaryBtn(disabled) {
   return {
     padding: "12px 14px",
@@ -219,6 +245,7 @@ function primaryBtn(disabled) {
     whiteSpace: "nowrap",
   };
 }
+
 function pre() {
   return {
     marginTop: 10,
@@ -231,6 +258,7 @@ function pre() {
     lineHeight: 1.6,
   };
 }
+
 function errorBox() {
   return {
     fontSize: 12,

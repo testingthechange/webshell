@@ -1,24 +1,21 @@
-/* ======================================================================
-   FILE: src/routes/Account.jsx
-   PURPOSE:
-   - Two-column Account layout
-   - "My Collection" row + popup
-   - Covers ALWAYS load by signing coverS3Key via /api/playback-url
-   - Main album cover ALSO signs manifest.coverS3Key (never relies on expired previewUrl)
-   ====================================================================== */
-
-import { useEffect, useMemo, useRef, useState } from "react";
-import { useNavigate, useParams } from "react-router-dom";
+// FILE: src/routes/Account.jsx
+import React, { useEffect, useMemo, useRef, useState } from "react";
+import { useNavigate, useParams, useSearchParams } from "react-router-dom";
 import AccountPlayerBar from "../components/AccountPlayerBar.jsx";
 import loadManifest from "../lib/loadManifest.js";
 
 const COLLECTION_KEY = "bb_collection_v1";
 
 const API_BASE =
-  String(import.meta?.env?.VITE_API_BASE || "").trim().replace(/\/+$/, "") ||
-  "https://album-backend-kmuo.onrender.com";
+  String(import.meta?.env?.VITE_API_BASE || "")
+    .trim()
+    .replace(/\/+$/, "") || "https://album-backend-kmuo.onrender.com";
 
 /* ---------------- helpers ---------------- */
+
+function safeString(v) {
+  return String(v ?? "").trim();
+}
 
 function safeParse(json) {
   try {
@@ -28,126 +25,288 @@ function safeParse(json) {
   }
 }
 
-function readCollection() {
+function readCollectionRaw() {
   const raw = localStorage.getItem(COLLECTION_KEY);
-  const arr = safeParse(raw || "[]");
-  return Array.isArray(arr) ? arr.filter(Boolean) : [];
+  const parsed = raw ? safeParse(raw) : null;
+  return Array.isArray(parsed) ? parsed : [];
+}
+
+function loadCollectionIds() {
+  const parsed = readCollectionRaw();
+  const out = [];
+
+  for (const x of parsed) {
+    if (!x) continue;
+    if (typeof x === "string") out.push(safeString(x));
+    else out.push(safeString(x?.shareId || x?.id || x?.share_id || x?.shareID || ""));
+  }
+
+  const seen = new Set();
+  const deduped = [];
+  for (const id of out) {
+    const v = safeString(id);
+    if (!v || seen.has(v)) continue;
+    seen.add(v);
+    deduped.push(v);
+  }
+  return deduped;
+}
+
+function saveCollectionIds(ids) {
+  const cleaned = [];
+  const seen = new Set();
+  for (const x of ids || []) {
+    const id = safeString(x);
+    if (!id || seen.has(id)) continue;
+    seen.add(id);
+    cleaned.push(id);
+  }
+  localStorage.setItem(COLLECTION_KEY, JSON.stringify(cleaned));
+  return cleaned;
+}
+
+function ensureShareIdInCollection(shareId) {
+  const id = safeString(shareId);
+  if (!id) return [];
+  const existing = loadCollectionIds();
+  const next = [id, ...existing.filter((x) => x !== id)];
+  return saveCollectionIds(next);
+}
+
+// IMPORTANT: "Owned" should be true if either:
+// - mock_owned:<id> is set
+// - OR the id is in bb_collection_v1
+function isOwned(shareId, collectionIdsOverride) {
+  const id = safeString(shareId);
+  if (!id) return false;
+
+  try {
+    if (localStorage.getItem(`mock_owned:${id}`) === "1") return true;
+  } catch {}
+
+  const ids = Array.isArray(collectionIdsOverride) ? collectionIdsOverride : loadCollectionIds();
+  return ids.includes(id);
+}
+
+async function fetchJson(url) {
+  const r = await fetch(url, { cache: "no-store" });
+  const j = await r.json().catch(() => null);
+  if (!r.ok) throw new Error((j && (j.error || j.message)) || `HTTP ${r.status}`);
+  return j;
 }
 
 async function signUrl(s3Key) {
-  const key = String(s3Key || "").trim();
+  const key = safeString(s3Key);
   if (!key) return "";
-  const r = await fetch(`${API_BASE}/api/playback-url?s3Key=${encodeURIComponent(key)}`, {
-    cache: "no-store",
-  });
-  const j = await r.json().catch(() => ({}));
-  if (!r.ok || !j?.ok) return "";
-  return String(j?.url || j?.playbackUrl || "");
+  const j = await fetchJson(`${API_BASE}/api/playback-url?s3Key=${encodeURIComponent(key)}`);
+  return safeString(j?.url || j?.playbackUrl || "");
 }
 
-function pickTracks(manifest) {
-  if (!manifest) return [];
-  if (Array.isArray(manifest.tracks)) return manifest.tracks;
-  if (Array.isArray(manifest.songs)) return manifest.songs;
-  if (Array.isArray(manifest.items)) return manifest.items;
-  if (Array.isArray(manifest?.album?.tracks)) return manifest.album.tracks;
+function pickTitle(m) {
+  return (
+    safeString(m?.title) ||
+    safeString(m?.name) ||
+    safeString(m?.album?.title) ||
+    safeString(m?.album?.name) ||
+    safeString(m?.meta?.albumTitle) ||
+    "Untitled"
+  );
+}
+
+function pickArtist(m) {
+  return (
+    safeString(m?.artist) ||
+    safeString(m?.album?.artist) ||
+    safeString(m?.meta?.artist) ||
+    "Unknown artist"
+  );
+}
+
+function pickDescription(m) {
+  return (
+    safeString(m?.description) ||
+    safeString(m?.album?.description) ||
+    safeString(m?.meta?.description) ||
+    ""
+  );
+}
+
+function pickCoverKey(m) {
+  return (
+    safeString(m?.coverS3Key) ||
+    safeString(m?.album?.coverKey) ||
+    safeString(m?.coverKey) ||
+    safeString(m?.artworkKey) ||
+    safeString(m?.album?.artworkKey) ||
+    ""
+  );
+}
+
+function pickTracks(m) {
+  if (Array.isArray(m?.tracks)) return m.tracks;
+  if (Array.isArray(m?.album?.tracks)) return m.album.tracks;
+  if (Array.isArray(m?.catalog?.songs)) return m.catalog.songs;
+  if (Array.isArray(m?.project?.catalog?.songs)) return m.project.catalog.songs;
   return [];
 }
 
-function trackId(t, i) {
-  return t?.id || t?.trackId || t?.shareTrackId || t?.s3Key || `${i}`;
+function pickTrackAudioKey(t) {
+  return (
+    safeString(t?.s3Key) ||
+    safeString(t?.audioS3Key) ||
+    safeString(t?.trackS3Key) ||
+    safeString(t?.playbackKey) ||
+    safeString(t?.fileKey) ||
+    safeString(t?.audioKey) ||
+    ""
+  );
 }
 
-function Section({ title, children, right }) {
-  return (
-    <div style={sectionStyle}>
-      {title ? (
-        <div style={sectionHeader}>
-          <div style={{ fontWeight: 900, fontSize: 16 }}>{title}</div>
-          {right || null}
-        </div>
-      ) : null}
-      {children}
-    </div>
-  );
+function trackId(t, i) {
+  return safeString(t?.id) || safeString(t?.s3Key) || safeString(t?.audioS3Key) || `track:${i}`;
 }
 
 /* ---------------- component ---------------- */
 
 export default function Account() {
-  const { shareId = "" } = useParams();
   const nav = useNavigate();
+  const params = useParams();
+  const [sp] = useSearchParams();
+
+  const routeShareId =
+    safeString(params?.shareId) ||
+    safeString(params?.id) ||
+    safeString(params?.shareid) ||
+    safeString(params?.shareID) ||
+    safeString(sp.get("shareId")) ||
+    safeString(sp.get("id"));
+
+  const purchasedFlag = safeString(sp.get("purchased")) === "1";
+
   const audioRef = useRef(null);
 
-  const [manifest, setManifest] = useState(null);
-  const [error, setError] = useState("");
-
-  const [collection, setCollection] = useState(() => readCollection());
+  // Existing file uses collection objects (shareId/title/artist/coverUrl etc.)
+  // Keep that model. We’ll refresh it from localStorage on open.
+  const [collection, setCollection] = useState([]);
   const [collectionOpen, setCollectionOpen] = useState(false);
 
-  // signed cover urls cache:
-  // - per shareId for collection tiles
-  // - plus current page cover url
-  const [signedCovers, setSignedCovers] = useState({});
-  const [pageCoverUrl, setPageCoverUrl] = useState("");
+  // cover url cache per shareId
+  const [signedCovers, setSignedCovers] = useState({}); // { [shareId]: signedUrl }
 
-  const tracks = useMemo(() => pickTracks(manifest), [manifest]);
+  const [shareId, setShareId] = useState("");
+  const [manifest, setManifest] = useState(null);
+  const [pageCoverUrl, setPageCoverUrl] = useState("");
+  const [tracks, setTracks] = useState([]);
 
   const [currentIndex, setCurrentIndex] = useState(0);
   const [currentTrack, setCurrentTrack] = useState(null);
-
   const [isPlaying, setIsPlaying] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(0);
 
-  const owned = useMemo(() => {
-    if (!shareId) return false;
-    try {
-      return localStorage.getItem(`mock_owned:${shareId}`) === "1";
-    } catch {
-      return false;
-    }
-  }, [shareId]);
+  const [error, setError] = useState("");
 
-  // refresh collection when popup opens / shareId changes
+  // derived ids list from localStorage (needed for owned + purchase landing)
+  const [collectionIds, setCollectionIds] = useState(() => loadCollectionIds());
+
+  const owned = useMemo(() => isOwned(shareId, collectionIds), [shareId, collectionIds.join("|")]);
+
+  /* ---------- localStorage sync ---------- */
+
   useEffect(() => {
-    setCollection(readCollection());
-  }, [shareId, collectionOpen]);
+    const onStorage = (e) => {
+      if (e?.key === COLLECTION_KEY) {
+        setCollectionIds(loadCollectionIds());
+      }
+    };
+    window.addEventListener("storage", onStorage);
+    return () => window.removeEventListener("storage", onStorage);
+  }, []);
 
-  // load manifest for current shareId
+  /* ---------- purchase landing self-heal ---------- */
+
+  useEffect(() => {
+    const id = safeString(routeShareId);
+    if (!id) return;
+
+    const existing = loadCollectionIds();
+
+    let shouldAdd = false;
+
+    if (purchasedFlag) shouldAdd = true;
+
+    if (!shouldAdd) {
+      try {
+        const raw = sessionStorage.getItem("bb_last_purchase_v1");
+        const j = raw ? safeParse(raw) : null;
+        const sid = safeString(j?.shareId);
+        const ts = Number(j?.ts || 0);
+        if (sid && sid === id && Number.isFinite(ts) && Date.now() - ts < 10 * 60 * 1000) {
+          shouldAdd = true;
+          sessionStorage.removeItem("bb_last_purchase_v1");
+        }
+      } catch {}
+    }
+
+    if (!shouldAdd && existing.length === 0) shouldAdd = true;
+    if (!shouldAdd) return;
+
+    ensureShareIdInCollection(id);
+    try {
+      localStorage.setItem(`mock_owned:${id}`, "1");
+    } catch {}
+
+    setCollectionIds(loadCollectionIds());
+  }, [routeShareId, purchasedFlag]);
+
+  /* ---------- load active page album ---------- */
+
   useEffect(() => {
     let cancelled = false;
 
     (async () => {
+      const id = safeString(routeShareId);
+      setShareId(id);
+      setError("");
+      setManifest(null);
+      setPageCoverUrl("");
+      setTracks([]);
+      setCurrentIndex(0);
+      setCurrentTrack(null);
+      setIsPlaying(false);
+      setCurrentTime(0);
+      setDuration(0);
+
+      const a = audioRef.current;
+      if (a) {
+        try {
+          a.pause?.();
+        } catch {}
+        a.removeAttribute("src");
+        try {
+          a.load?.();
+        } catch {}
+      }
+
+      if (!id) return;
+
       try {
-        setError("");
-        setManifest(null);
-        setPageCoverUrl("");
-        setIsPlaying(false);
-        setCurrentTime(0);
-        setDuration(0);
-        setCurrentIndex(0);
-        setCurrentTrack(null);
-
-        if (!shareId) return;
-
-        const m = await loadManifest(shareId);
+        const m = await loadManifest(id);
         if (cancelled) return;
 
         setManifest(m);
 
-        const ts = pickTracks(m);
-        if (ts.length) {
+        const list = pickTracks(m);
+        setTracks(list);
+
+        if (list.length) {
           setCurrentIndex(0);
-          setCurrentTrack(ts[0]);
+          setCurrentTrack(list[0]);
         }
 
-        // IMPORTANT: cover comes from coverS3Key -> sign it
-        const coverKey = String(m?.coverS3Key || "").trim();
-        if (coverKey) {
-          const url = await signUrl(coverKey);
-          if (!cancelled) setPageCoverUrl(url || "");
-        }
+        const coverKey = pickCoverKey(m);
+        const url = coverKey ? await signUrl(coverKey) : "";
+        if (!cancelled) setPageCoverUrl(url || "");
       } catch (e) {
         if (!cancelled) setError(String(e?.message || e));
       }
@@ -156,47 +315,54 @@ export default function Account() {
     return () => {
       cancelled = true;
     };
-  }, [shareId]);
+  }, [routeShareId]);
 
-  // sign missing collection cover urls (from entry.coverS3Key)
+  /* ---------- bind audio src ---------- */
+
   useEffect(() => {
     let cancelled = false;
 
     (async () => {
-      const rows = readCollection();
-      for (const a of rows) {
-        const id = String(a?.shareId || "").trim();
-        const key = String(a?.coverS3Key || "").trim();
-        if (!id || !key) continue;
-        if (signedCovers[id]) continue;
+      const a = audioRef.current;
+      const t = currentTrack;
+      if (!a || !t) return;
 
+      const key = pickTrackAudioKey(t);
+      if (!key) return;
+
+      try {
         const url = await signUrl(key);
-        if (cancelled) return;
-        if (url) setSignedCovers((p) => ({ ...p, [id]: url }));
-      }
+        if (cancelled || !url) return;
+
+        if (a.src !== url) {
+          a.src = url;
+          try {
+            a.load?.();
+          } catch {}
+        }
+
+        if (isPlaying) {
+          a.play?.().catch(() => {});
+        }
+      } catch {}
     })();
 
     return () => {
       cancelled = true;
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [collectionOpen, shareId, collection.length]);
+  }, [currentTrack, isPlaying]);
 
-  function onSeek(newTime) {
-    const a = audioRef.current;
-    if (!a) return;
-    try {
-      a.currentTime = newTime;
-      setCurrentTime(newTime);
-    } catch {}
-  }
+  /* ---------- navigation helpers ---------- */
 
   function selectTrack(i) {
-    const t = tracks[i];
+    const t = tracks?.[i];
     if (!t) return;
     setCurrentIndex(i);
     setCurrentTrack(t);
     setIsPlaying(true);
+    try {
+      audioRef.current?.play?.();
+    } catch {}
   }
 
   function prevTrack() {
@@ -207,23 +373,109 @@ export default function Account() {
     if (currentIndex < tracks.length - 1) selectTrack(currentIndex + 1);
   }
 
+  function onSeek(t) {
+    const a = audioRef.current;
+    if (!a) return;
+    a.currentTime = t;
+    setCurrentTime(t);
+  }
+
+  /* ---------- collection model + cover signing ---------- */
+
+  function readCollection() {
+    // Your existing app stores either:
+    // - bb_collection_v1 (array of shareIds)
+    // - mock_library (array of {shareId,title,artist,coverUrl,...})
+    // Prefer mock_library for title/artist if present, fallback to ids list.
+    const ids = loadCollectionIds();
+
+    let lib = [];
+    try {
+      const raw = localStorage.getItem("mock_library");
+      const parsed = raw ? safeParse(raw) : null;
+      if (Array.isArray(parsed)) lib = parsed;
+    } catch {}
+
+    const byId = new Map();
+    for (const x of lib) {
+      const sid = safeString(x?.shareId || x?.id);
+      if (!sid) continue;
+      byId.set(sid, x);
+    }
+
+    return ids.map((sid) => {
+      const x = byId.get(sid) || {};
+      return {
+        shareId: sid,
+        title: safeString(x?.title) || "Album",
+        artist: safeString(x?.artist) || "",
+        coverUrl: safeString(x?.coverUrl) || "",
+        purchasedAt: x?.purchasedAt || "",
+      };
+    });
+  }
+
   function openCollection() {
-    setCollection(readCollection());
+    const next = readCollection();
+    setCollection(next);
     setCollectionOpen(true);
   }
 
   function collectionCoverUrl(a) {
-    const id = String(a?.shareId || "").trim();
-    return String(signedCovers[id] || "").trim();
+    const id = safeString(a?.shareId);
+    return safeString(signedCovers?.[id] || "");
   }
 
-  const title =
-    manifest?.title || manifest?.name || manifest?.album?.title || manifest?.album?.name || "Account";
-  const artist = manifest?.artist || manifest?.album?.artist || "";
-  const description = manifest?.description || manifest?.album?.description || "";
+  // IMPORTANT: whenever collection list changes (or popup opens), sign covers for missing ones
+  useEffect(() => {
+    let cancelled = false;
+
+    (async () => {
+      const ids = (collection || [])
+        .map((a) => safeString(a?.shareId))
+        .filter(Boolean);
+
+      for (const id of ids) {
+        if (cancelled) return;
+        if (signedCovers[id]) continue;
+
+        try {
+          const m = await loadManifest(id);
+          if (cancelled) return;
+
+          const coverKey = pickCoverKey(m);
+          if (!coverKey) continue;
+
+          const url = await signUrl(coverKey);
+          if (cancelled || !url) continue;
+
+          setSignedCovers((prev) => ({ ...prev, [id]: url }));
+        } catch {
+          // ignore
+        }
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [collectionOpen, collection.map((x) => safeString(x?.shareId)).join("|")]);
+
+  const title = pickTitle(manifest) || "Account";
+  const artist = pickArtist(manifest) || "";
+  const description = pickDescription(manifest) || "";
 
   return (
     <div style={{ width: "70%", maxWidth: 1320, margin: "0 auto", padding: "28px 0" }}>
+      <audio
+        ref={audioRef}
+        preload="metadata"
+        style={{ display: "none" }}
+        onTimeUpdate={(e) => setCurrentTime(e.currentTarget.currentTime)}
+        onLoadedMetadata={(e) => setDuration(e.currentTarget.duration || 0)}
+      />
+
       {error ? (
         <Section title="Error">
           <div style={{ opacity: 0.85, whiteSpace: "pre-wrap" }}>{error}</div>
@@ -241,11 +493,12 @@ export default function Account() {
           }
         >
           <div style={{ display: "flex", gap: 14, overflowX: "auto", paddingBottom: 4 }}>
-            {collection.map((a) => {
+            {collection.map((a, idx) => {
               const img = collectionCoverUrl(a);
+              const sid = safeString(a?.shareId) || `item:${idx}`;
               return (
                 <button
-                  key={a?.shareId}
+                  key={`${sid}:${idx}`}
                   type="button"
                   onClick={() => a?.shareId && nav(`/account/${a.shareId}`)}
                   style={thumbItem}
@@ -294,11 +547,12 @@ export default function Account() {
             <div style={{ padding: 12 }}>
               {collection.length ? (
                 <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-                  {collection.map((a) => {
+                  {collection.map((a, idx) => {
                     const img = collectionCoverUrl(a);
+                    const sid = safeString(a?.shareId) || `row:${idx}`;
                     return (
                       <button
-                        key={a?.shareId}
+                        key={`${sid}:${idx}`}
                         type="button"
                         onClick={() => {
                           setCollectionOpen(false);
@@ -356,17 +610,10 @@ export default function Account() {
 
         {/* COLUMN TWO */}
         <div style={{ display: "flex", flexDirection: "column", gap: 22 }}>
-          <Section
-            title={title}
-            right={<span style={{ opacity: 0.8 }}>{owned ? "Owned" : "Not owned"}</span>}
-          >
+          <Section title={title} right={<span style={{ opacity: 0.8 }}>{owned ? "Owned" : "Not owned"}</span>}>
             {artist ? <div style={{ opacity: 0.7 }}>{artist}</div> : null}
-            {description ? (
-              <div style={{ marginTop: 10, lineHeight: 1.6 }}>{description}</div>
-            ) : null}
-            {shareId ? (
-              <div style={{ marginTop: 10, opacity: 0.55, fontSize: 12 }}>{shareId}</div>
-            ) : null}
+            {description ? <div style={{ marginTop: 10, lineHeight: 1.6 }}>{description}</div> : null}
+            {shareId ? <div style={{ marginTop: 10, opacity: 0.55, fontSize: 12 }}>{shareId}</div> : null}
           </Section>
 
           <Section title="Menu">
@@ -450,6 +697,22 @@ export default function Account() {
   );
 }
 
+/* ---------------- small components ---------------- */
+
+function Section({ title, right, children }) {
+  return (
+    <div style={sectionStyle}>
+      {(title || right) ? (
+        <div style={sectionHeader}>
+          <div style={{ fontWeight: 900 }}>{title || ""}</div>
+          <div>{right || null}</div>
+        </div>
+      ) : null}
+      {children}
+    </div>
+  );
+}
+
 /* ---------------- styles ---------------- */
 
 const sectionStyle = {
@@ -497,6 +760,18 @@ const coverPlaceholder = {
   fontSize: 14,
 };
 
+const thumbSmall = {
+  width: 56,
+  height: 56,
+  borderRadius: 14,
+  overflow: "hidden",
+  border: "1px solid rgba(255,255,255,0.14)",
+  background: "rgba(255,255,255,0.05)",
+  display: "grid",
+  placeItems: "center",
+  flexShrink: 0,
+};
+
 const coverPlaceholderSmall = {
   width: "100%",
   height: "100%",
@@ -518,99 +793,78 @@ const smallLinkBtn = {
   cursor: "pointer",
 };
 
-const miniNavBtn = {
-  width: "100%",
-  padding: "12px 12px",
-  borderRadius: 14,
-  border: "1px solid rgba(255,255,255,0.14)",
-  background: "rgba(255,255,255,0.06)",
-  color: "#fff",
-  fontWeight: 900,
-  textAlign: "left",
-  cursor: "pointer",
-};
-
 const popupOverlay = {
   position: "fixed",
   inset: 0,
   background: "rgba(0,0,0,0.55)",
-  display: "flex",
-  justifyContent: "center",
-  alignItems: "center",
   zIndex: 50,
-  padding: 16,
+  display: "grid",
+  placeItems: "center",
+  padding: 18,
 };
 
 const popupCard = {
-  width: 560,
-  maxWidth: "100%",
-  borderRadius: 20,
+  width: "min(860px, 96vw)",
+  borderRadius: 18,
   border: "1px solid rgba(255,255,255,0.14)",
-  background: "rgba(10,10,10,0.94)",
-  backdropFilter: "blur(10px)",
-  boxShadow: "0 22px 80px rgba(0,0,0,0.55)",
+  background: "rgba(20,20,20,0.92)",
+  backdropFilter: "blur(12px)",
   overflow: "hidden",
 };
 
 const popupHeader = {
+  padding: 14,
   display: "flex",
-  justifyContent: "space-between",
   alignItems: "center",
-  padding: "12px 12px",
+  justifyContent: "space-between",
   borderBottom: "1px solid rgba(255,255,255,0.10)",
 };
 
 const closeBtn = {
-  width: 34,
+  width: 38,
   height: 34,
   borderRadius: 12,
   border: "1px solid rgba(255,255,255,0.14)",
   background: "rgba(255,255,255,0.06)",
   color: "#fff",
   cursor: "pointer",
+  fontWeight: 900,
 };
 
 const albumRow = {
   width: "100%",
-  padding: 12,
+  textAlign: "left",
+  padding: 14,
   borderRadius: 16,
-  border: "1px solid rgba(255,255,255,0.14)",
-  background: "rgba(255,255,255,0.06)",
+  border: "1px solid rgba(255,255,255,0.10)",
+  background: "rgba(255,255,255,0.04)",
   color: "#fff",
   cursor: "pointer",
-};
-
-const thumbSmall = {
-  width: 46,
-  height: 46,
-  borderRadius: 12,
-  overflow: "hidden",
-  border: "1px solid rgba(255,255,255,0.12)",
-  background: "rgba(255,255,255,0.06)",
-  display: "flex",
-  alignItems: "center",
-  justifyContent: "center",
 };
 
 const pageCoverBox = {
   width: "100%",
   aspectRatio: "1 / 1",
   borderRadius: 24,
-  overflow: "hidden",
   border: "1px solid rgba(255,255,255,0.12)",
   background: "rgba(255,255,255,0.05)",
   display: "flex",
   alignItems: "center",
   justifyContent: "center",
+  overflow: "hidden",
 };
 
 const pageCoverPlaceholder = {
-  width: "100%",
-  height: "100%",
-  display: "flex",
-  alignItems: "center",
-  justifyContent: "center",
+  opacity: 0.6,
   letterSpacing: 2,
-  opacity: 0.55,
-  fontSize: 14,
+};
+
+const miniNavBtn = {
+  padding: "12px 12px",
+  borderRadius: 14,
+  border: "1px solid rgba(255,255,255,0.12)",
+  background: "rgba(255,255,255,0.04)",
+  color: "#fff",
+  fontWeight: 900,
+  cursor: "pointer",
 };

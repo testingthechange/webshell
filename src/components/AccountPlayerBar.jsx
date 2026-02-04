@@ -1,15 +1,16 @@
-import { useEffect, useRef, useState } from "react";
-import { formatDuration } from "../lib/loadManifest.js";
+// src/components/AccountPlayerBar.jsx
+import { useEffect, useMemo, useState } from "react";
 
-const DEFAULT_API_BASE =
-  String(import.meta?.env?.VITE_API_BASE || "").trim().replace(/\/+$/, "") ||
-  "https://album-backend-kmuo.onrender.com";
+function clamp(n, min, max) {
+  return Math.max(min, Math.min(max, n));
+}
 
 /**
- * AccountPlayerBar (ACCOUNT ONLY)
- * - Own copy of playback logic so Account changes cannot break Product.
- * - Same signed-url + autoplay ordering fix.
- * - No preview cap.
+ * AccountPlayerBar
+ * - Bottom player bar UI for Account route
+ * - Adds mode switch under the time (right side):
+ *   Album (radio), Smart Bridge (radio)
+ * - Pulses the active mode indicator
  */
 export default function AccountPlayerBar({
   audioRef,
@@ -17,183 +18,277 @@ export default function AccountPlayerBar({
   isPlaying,
   currentTime,
   duration,
-  playbackMode = "full",
   onPlay,
   onPause,
   onTimeUpdate,
   onDurationChange,
   onSeek,
   onTrackEnd,
+  onPrev,
+  onNext,
+  hasPrev,
+  hasNext,
+
+  // NEW (optional)
+  playbackMode, // "album" | "smartBridge"
+  onPlaybackModeChange,
 }) {
-  const internalAudioRef = useRef(null);
-  const actualRef = audioRef || internalAudioRef;
+  // Back-compat: if parent doesn't pass mode props, manage locally.
+  const isControlled =
+    typeof playbackMode === "string" && typeof onPlaybackModeChange === "function";
+  const [localMode, setLocalMode] = useState("album");
 
-  const [debug, setDebug] = useState({
-    lastS3Key: "",
-    playError: "",
-  });
+  const mode = isControlled ? playbackMode : localMode;
 
-  useEffect(() => {
-    const audio = actualRef.current;
-    if (!audio || !currentTrack) return;
-
-    let cancelled = false;
-
-    (async () => {
-      try {
-        const s3Key = String(currentTrack.s3Key || "").trim();
-        if (!s3Key) throw new Error("TRACK_MISSING_S3KEY");
-
-        setDebug((d) => ({ ...d, lastS3Key: s3Key, playError: "" }));
-
-        const apiBase = String(currentTrack.apiBase || DEFAULT_API_BASE).replace(/\/+$/, "");
-        const endpoint = `${apiBase}/api/playback-url?s3Key=${encodeURIComponent(s3Key)}`;
-
-        const r = await fetch(endpoint, { cache: "no-store" });
-        const j = await r.json().catch(() => ({}));
-        if (!r.ok) throw new Error(j?.error || `SIGNED_URL_HTTP_${r.status}`);
-
-        const signedUrl = String(j?.url || j?.playbackUrl || "").trim();
-        if (!signedUrl) throw new Error("SIGNED_URL_MISSING");
-
-        if (cancelled) return;
-
-        const srcChanged = audio.src !== signedUrl;
-
-        if (srcChanged) {
-          audio.src = signedUrl;
-          audio.currentTime = 0;
-          if (typeof onTimeUpdate === "function") onTimeUpdate(0);
-          if (typeof audio.load === "function") audio.load();
-        }
-
-        if (isPlaying) {
-          audio.play().catch((e) => {
-            if (cancelled) return;
-            setDebug((d) => ({
-              ...d,
-              playError: String(e?.name || "") + ":" + String(e?.message || e),
-            }));
-          });
-        }
-      } catch (e) {
-        if (cancelled) return;
-        setDebug((d) => ({ ...d, playError: String(e?.message || e) }));
-      }
-    })();
-
-    return () => {
-      cancelled = true;
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [currentTrack?.id, currentTrack?.s3Key, isPlaying]);
-
-  useEffect(() => {
-    const audio = actualRef.current;
-    if (!audio) return;
-
-    const handleTimeUpdate = () => {
-      const t = audio.currentTime || 0;
-      if (typeof onTimeUpdate === "function") onTimeUpdate(t);
-    };
-
-    const handleLoadedMetadata = () => {
-      if (typeof onDurationChange === "function") onDurationChange(audio.duration || 0);
-    };
-
-    const handleEnded = () => {
-      if (typeof onPause === "function") onPause();
-      if (typeof onTrackEnd === "function") onTrackEnd();
-    };
-
-    audio.addEventListener("timeupdate", handleTimeUpdate);
-    audio.addEventListener("loadedmetadata", handleLoadedMetadata);
-    audio.addEventListener("ended", handleEnded);
-
-    return () => {
-      audio.removeEventListener("timeupdate", handleTimeUpdate);
-      audio.removeEventListener("loadedmetadata", handleLoadedMetadata);
-      audio.removeEventListener("ended", handleEnded);
-    };
-  }, [actualRef, onTimeUpdate, onDurationChange, onTrackEnd, onPause]);
-
-  useEffect(() => {
-    const audio = actualRef.current;
-    if (!audio) return;
-
-    if (!currentTrack) {
-      try {
-        audio.pause();
-      } catch {}
-      return;
-    }
-
-    if (isPlaying) {
-      audio.play().catch((e) => {
-        setDebug((d) => ({
-          ...d,
-          playError: String(e?.name || "") + ":" + String(e?.message || e),
-        }));
-      });
-    } else {
-      try {
-        audio.pause();
-      } catch {}
-    }
-  }, [isPlaying, currentTrack?.id, actualRef]);
-
-  const maxDuration = duration || 0;
-  const progressPercent = maxDuration > 0 ? (currentTime / maxDuration) * 100 : 0;
-
-  const handleProgressClick = (e) => {
-    const bar = e.currentTarget;
-    const rect = bar.getBoundingClientRect();
-    const percent = (e.clientX - rect.left) / rect.width;
-    const newTime = percent * maxDuration;
-    if (typeof onSeek === "function") onSeek(newTime);
+  const setMode = (next) => {
+    if (isControlled) onPlaybackModeChange(next);
+    else setLocalMode(next);
   };
 
-  const togglePlayPause = () => {
-    if (!currentTrack) return;
-    if (isPlaying) {
-      if (typeof onPause === "function") onPause();
+  const title = useMemo(() => {
+    return currentTrack?.title || currentTrack?.name || "";
+  }, [currentTrack]);
+
+  // Wire audio -> parent callbacks (if provided)
+  useEffect(() => {
+    const a = audioRef?.current;
+    if (!a) return;
+
+    const onLoadedMetadata = () => {
+      const d = Number.isFinite(a.duration) ? a.duration : 0;
+      onDurationChange?.(d);
+    };
+
+    const onTime = () => {
+      onTimeUpdate?.(a.currentTime || 0);
+    };
+
+    const onEndedLocal = () => {
+      onTrackEnd?.();
+    };
+
+    a.addEventListener("loadedmetadata", onLoadedMetadata);
+    a.addEventListener("timeupdate", onTime);
+    a.addEventListener("ended", onEndedLocal);
+
+    return () => {
+      a.removeEventListener("loadedmetadata", onLoadedMetadata);
+      a.removeEventListener("timeupdate", onTime);
+      a.removeEventListener("ended", onEndedLocal);
+    };
+  }, [audioRef, onDurationChange, onTimeUpdate, onTrackEnd]);
+
+  function togglePlay() {
+    const a = audioRef?.current;
+    if (!a) return;
+
+    if (a.paused) {
+      onPlay?.();
+      a.play?.().catch(() => {});
     } else {
-      if (typeof onPlay === "function") onPlay();
+      onPause?.();
+      a.pause?.();
     }
-  };
+  }
+
+  function seekByClick(e) {
+    const a = audioRef?.current;
+    if (!a || !duration) return;
+
+    const rect = e.currentTarget.getBoundingClientRect();
+    const x = clamp(e.clientX - rect.left, 0, rect.width);
+    const pct = rect.width ? x / rect.width : 0;
+    const t = pct * duration;
+
+    a.currentTime = t;
+    onSeek?.(t);
+  }
+
+  const pct = duration > 0 ? clamp((currentTime || 0) / duration, 0, 1) : 0;
+
+  // Match your current UI style: show raw seconds as "0 / 131"
+  const leftTime = Math.floor(currentTime || 0);
+  const rightTime = Math.floor(duration || 0);
 
   return (
-    <div className="player-bar">
-      <audio ref={actualRef} preload="metadata" />
+    <div style={wrap}>
+      <style>{`
+        @keyframes modePulse {
+          0% { transform: scale(1); opacity: 0.85; }
+          50% { transform: scale(1.25); opacity: 1; }
+          100% { transform: scale(1); opacity: 0.85; }
+        }
+      `}</style>
 
-      <div className="player-controls">
-        <button
-          className="player-btn player-btn-play"
-          onClick={togglePlayPause}
-          disabled={!currentTrack}
-        >
-          {isPlaying ? "❚❚" : "▶"}
-        </button>
-      </div>
+      <div style={bar}>
+        <div style={row}>
+          <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
+            <button type="button" onClick={onPrev} disabled={!hasPrev} style={btn}>
+              Prev
+            </button>
 
-      <div className="player-progress">
-        <div className="player-progress-bar" onClick={handleProgressClick}>
-          <div
-            className="player-progress-fill"
-            style={{ width: `${Math.min(progressPercent, 100)}%` }}
-          />
+            <button type="button" onClick={togglePlay} style={btn}>
+              {isPlaying ? "Pause" : "Play"}
+            </button>
+
+            <button type="button" onClick={onNext} disabled={!hasNext} style={btn}>
+              Next
+            </button>
+          </div>
+
+          {/* Right side: time + mode switch under time */}
+          <div style={right}>
+            <div style={timeText}>
+              {leftTime} / {rightTime}
+            </div>
+
+            <div style={modes}>
+              <label style={modeLabel} onClick={() => setMode("album")}>
+                <span
+                  aria-hidden="true"
+                  style={{
+                    ...dot,
+                    background: mode === "album" ? "rgba(255,255,255,0.95)" : "transparent",
+                    animation: mode === "album" ? "modePulse 1.1s ease-in-out infinite" : "none",
+                  }}
+                />
+                <input
+                  type="radio"
+                  name="accountPlaybackMode"
+                  value="album"
+                  checked={mode === "album"}
+                  onChange={() => setMode("album")}
+                  style={{ display: "none" }}
+                />
+                <span style={modeText}>Album</span>
+              </label>
+
+              <label style={modeLabel} onClick={() => setMode("smartBridge")}>
+                <span
+                  aria-hidden="true"
+                  style={{
+                    ...dot,
+                    background: mode === "smartBridge" ? "rgba(255,255,255,0.95)" : "transparent",
+                    animation:
+                      mode === "smartBridge" ? "modePulse 1.1s ease-in-out infinite" : "none",
+                  }}
+                />
+                <input
+                  type="radio"
+                  name="accountPlaybackMode"
+                  value="smartBridge"
+                  checked={mode === "smartBridge"}
+                  onChange={() => setMode("smartBridge")}
+                  style={{ display: "none" }}
+                />
+                <span style={modeText}>Smart Bridge</span>
+              </label>
+            </div>
+          </div>
         </div>
 
-        <span className="player-track-name">
-          {currentTrack?.title || currentTrack?.name || "—"}
-        </span>
+        <div
+          onClick={seekByClick}
+          role="button"
+          tabIndex={0}
+          style={seek}
+          aria-label="Seek"
+        >
+          <div style={{ ...seekFill, width: `${pct * 100}%` }} />
+        </div>
 
-        <span className="player-time">
-          {formatDuration(currentTime)} / {formatDuration(maxDuration)}
-        </span>
-
-        <div style={{ fontSize: 11, opacity: 0.65, marginTop: 6 }} />
+        {title ? <div style={trackTitle}>{title}</div> : null}
       </div>
     </div>
   );
 }
+
+/* ---------------- styles ---------------- */
+
+const wrap = {
+  width: "100%",
+};
+
+const bar = {
+  width: "100%",
+  borderRadius: 18,
+  border: "1px solid rgba(255,255,255,0.14)",
+  background: "rgba(255,255,255,0.06)",
+  padding: 14,
+};
+
+const row = {
+  display: "flex",
+  alignItems: "center",
+  justifyContent: "space-between",
+  gap: 12,
+  marginBottom: 10,
+};
+
+const btn = {
+  padding: "8px 14px",
+  borderRadius: 10,
+  border: "1px solid rgba(255,255,255,0.18)",
+  background: "rgba(255,255,255,0.10)",
+  color: "inherit",
+  cursor: "pointer",
+};
+
+const right = {
+  display: "flex",
+  flexDirection: "column",
+  alignItems: "flex-end",
+  gap: 6,
+  minWidth: 160,
+};
+
+const timeText = {
+  opacity: 0.85,
+  fontVariantNumeric: "tabular-nums",
+};
+
+const modes = {
+  display: "flex",
+  gap: 12,
+  alignItems: "center",
+};
+
+const modeLabel = {
+  display: "flex",
+  gap: 6,
+  alignItems: "center",
+  cursor: "pointer",
+  userSelect: "none",
+};
+
+const dot = {
+  width: 10,
+  height: 10,
+  borderRadius: 999,
+  border: "1px solid rgba(255,255,255,0.55)",
+};
+
+const modeText = {
+  fontSize: 12,
+  opacity: 0.85,
+};
+
+const seek = {
+  height: 10,
+  borderRadius: 999,
+  background: "rgba(255,255,255,0.12)",
+  cursor: "pointer",
+  position: "relative",
+  overflow: "hidden",
+};
+
+const seekFill = {
+  height: "100%",
+  background: "rgba(255,255,255,0.7)",
+};
+
+const trackTitle = {
+  marginTop: 10,
+  opacity: 0.85,
+  fontSize: 12,
+};

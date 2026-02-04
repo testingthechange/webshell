@@ -1,16 +1,15 @@
-// src/components/AccountPlayerBar.jsx
-import { useEffect, useMemo, useState } from "react";
+// FILE: src/components/AccountPlayerBar.jsx
+import { useEffect } from "react";
 
 function clamp(n, min, max) {
   return Math.max(min, Math.min(max, n));
 }
 
 /**
- * AccountPlayerBar
- * - Bottom player bar UI for Account route
- * - Adds mode switch under the time (right side):
- *   Album (radio), Smart Bridge (radio)
- * - Pulses the active mode indicator
+ * AccountPlayerBar (ACCOUNT-ONLY)
+ * - Controlled mode toggle (Album / Smart Bridge)
+ * - Emits mode changes upward (no local mode state)
+ * - Pulses active mode dot
  */
 export default function AccountPlayerBar({
   audioRef,
@@ -29,27 +28,11 @@ export default function AccountPlayerBar({
   hasPrev,
   hasNext,
 
-  // NEW (optional)
+  // REQUIRED for “finish the loop”
   playbackMode, // "album" | "smartBridge"
-  onPlaybackModeChange,
+  onPlaybackModeChange, // (nextMode) => void
 }) {
-  // Back-compat: if parent doesn't pass mode props, manage locally.
-  const isControlled =
-    typeof playbackMode === "string" && typeof onPlaybackModeChange === "function";
-  const [localMode, setLocalMode] = useState("album");
-
-  const mode = isControlled ? playbackMode : localMode;
-
-  const setMode = (next) => {
-    if (isControlled) onPlaybackModeChange(next);
-    else setLocalMode(next);
-  };
-
-  const title = useMemo(() => {
-    return currentTrack?.title || currentTrack?.name || "";
-  }, [currentTrack]);
-
-  // Wire audio -> parent callbacks (if provided)
+  // Wire audio events -> parent callbacks (if provided)
   useEffect(() => {
     const a = audioRef?.current;
     if (!a) return;
@@ -106,9 +89,11 @@ export default function AccountPlayerBar({
 
   const pct = duration > 0 ? clamp((currentTime || 0) / duration, 0, 1) : 0;
 
-  // Match your current UI style: show raw seconds as "0 / 131"
+  // Match existing bar look: raw seconds readout
   const leftTime = Math.floor(currentTime || 0);
   const rightTime = Math.floor(duration || 0);
+
+  const mode = playbackMode === "smartBridge" ? "smartBridge" : "album";
 
   return (
     <div style={wrap}>
@@ -136,14 +121,14 @@ export default function AccountPlayerBar({
             </button>
           </div>
 
-          {/* Right side: time + mode switch under time */}
+          {/* Right side: time + mode radios */}
           <div style={right}>
             <div style={timeText}>
               {leftTime} / {rightTime}
             </div>
 
             <div style={modes}>
-              <label style={modeLabel} onClick={() => setMode("album")}>
+              <label style={modeLabel}>
                 <span
                   aria-hidden="true"
                   style={{
@@ -157,13 +142,13 @@ export default function AccountPlayerBar({
                   name="accountPlaybackMode"
                   value="album"
                   checked={mode === "album"}
-                  onChange={() => setMode("album")}
+                  onChange={() => onPlaybackModeChange?.("album")}
                   style={{ display: "none" }}
                 />
                 <span style={modeText}>Album</span>
               </label>
 
-              <label style={modeLabel} onClick={() => setMode("smartBridge")}>
+              <label style={modeLabel}>
                 <span
                   aria-hidden="true"
                   style={{
@@ -178,7 +163,7 @@ export default function AccountPlayerBar({
                   name="accountPlaybackMode"
                   value="smartBridge"
                   checked={mode === "smartBridge"}
-                  onChange={() => setMode("smartBridge")}
+                  onChange={() => onPlaybackModeChange?.("smartBridge")}
                   style={{ display: "none" }}
                 />
                 <span style={modeText}>Smart Bridge</span>
@@ -187,17 +172,13 @@ export default function AccountPlayerBar({
           </div>
         </div>
 
-        <div
-          onClick={seekByClick}
-          role="button"
-          tabIndex={0}
-          style={seek}
-          aria-label="Seek"
-        >
+        <div onClick={seekByClick} role="button" tabIndex={0} style={seek} aria-label="Seek">
           <div style={{ ...seekFill, width: `${pct * 100}%` }} />
         </div>
 
-        {title ? <div style={trackTitle}>{title}</div> : null}
+        {currentTrack?.title || currentTrack?.name ? (
+          <div style={trackTitle}>{currentTrack?.title || currentTrack?.name}</div>
+        ) : null}
       </div>
     </div>
   );
@@ -205,9 +186,7 @@ export default function AccountPlayerBar({
 
 /* ---------------- styles ---------------- */
 
-const wrap = {
-  width: "100%",
-};
+const wrap = { width: "100%" };
 
 const bar = {
   width: "100%",
@@ -239,7 +218,7 @@ const right = {
   flexDirection: "column",
   alignItems: "flex-end",
   gap: 6,
-  minWidth: 160,
+  minWidth: 180,
 };
 
 const timeText = {
@@ -247,11 +226,7 @@ const timeText = {
   fontVariantNumeric: "tabular-nums",
 };
 
-const modes = {
-  display: "flex",
-  gap: 12,
-  alignItems: "center",
-};
+const modes = { display: "flex", gap: 12, alignItems: "center" };
 
 const modeLabel = {
   display: "flex",
@@ -268,10 +243,7 @@ const dot = {
   border: "1px solid rgba(255,255,255,0.55)",
 };
 
-const modeText = {
-  fontSize: 12,
-  opacity: 0.85,
-};
+const modeText = { fontSize: 12, opacity: 0.85 };
 
 const seek = {
   height: 10,
@@ -282,13 +254,6 @@ const seek = {
   overflow: "hidden",
 };
 
-const seekFill = {
-  height: "100%",
-  background: "rgba(255,255,255,0.7)",
-};
+const seekFill = { height: "100%", background: "rgba(255,255,255,0.7)" };
 
-const trackTitle = {
-  marginTop: 10,
-  opacity: 0.85,
-  fontSize: 12,
-};
+const trackTitle = { marginTop: 10, opacity: 0.85, fontSize: 12 };

@@ -4,6 +4,10 @@ import { useNavigate, useParams, useSearchParams } from "react-router-dom";
 import AccountPlayerBar from "../components/AccountPlayerBar.jsx";
 import loadManifest from "../lib/loadManifest.js";
 
+// Smart Bridge (account-only)
+import SmartBridgeCard from "../components/account/SmartBridgeCard.jsx";
+import { useAccountPlaybackMode } from "../components/account/useAccountPlaybackMode.js";
+
 const COLLECTION_KEY = "bb_collection_v1";
 
 const API_BASE =
@@ -210,6 +214,9 @@ export default function Account() {
   const [collectionIds, setCollectionIds] = useState(() => loadCollectionIds());
 
   const owned = useMemo(() => isOwned(shareId, collectionIds), [shareId, collectionIds.join("|")]);
+
+  // Account-only playback mode (Album vs Smart Bridge), persisted per shareId
+  const { mode, setMode } = useAccountPlaybackMode({ shareId });
 
   /* ---------- localStorage sync ---------- */
 
@@ -636,37 +643,48 @@ export default function Account() {
             </div>
           </Section>
 
-          <Section title="Tracks" right={<span style={{ opacity: 0.75 }}>{tracks.length}</span>}>
-            {tracks?.length ? (
-              <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-                {tracks.map((t, i) => {
-                  const label = t?.title || t?.name || `Track ${i + 1}`;
-                  const active = i === currentIndex;
-                  return (
-                    <button
-                      key={trackId(t, i)}
-                      type="button"
-                      onClick={() => selectTrack(i)}
-                      style={{
-                        textAlign: "left",
-                        padding: "10px 12px",
-                        borderRadius: 12,
-                        border: "1px solid rgba(255,255,255,0.12)",
-                        background: active ? "rgba(255,255,255,0.10)" : "transparent",
-                        color: "#fff",
-                        cursor: "pointer",
-                      }}
-                    >
-                      <span style={{ opacity: 0.7, marginRight: 8 }}>{i + 1}.</span>
-                      {label}
-                    </button>
-                  );
-                })}
-              </div>
-            ) : (
-              <div style={{ opacity: 0.75 }}>No tracks.</div>
-            )}
-          </Section>
+          {/* OPTION 1: Replace Tracks list entirely when Smart Bridge mode is active */}
+          {mode === "smartBridge" ? (
+            <SmartBridgeCard
+              shareId={shareId}
+              tracks={tracks}
+              onRequestPlay={() => {
+                // skeleton-only: no audio changes yet
+              }}
+            />
+          ) : (
+            <Section title="Tracks" right={<span style={{ opacity: 0.75 }}>{tracks.length}</span>}>
+              {tracks?.length ? (
+                <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                  {tracks.map((t, i) => {
+                    const label = t?.title || t?.name || `Track ${i + 1}`;
+                    const active = i === currentIndex;
+                    return (
+                      <button
+                        key={trackId(t, i)}
+                        type="button"
+                        onClick={() => selectTrack(i)}
+                        style={{
+                          textAlign: "left",
+                          padding: "10px 12px",
+                          borderRadius: 12,
+                          border: "1px solid rgba(255,255,255,0.12)",
+                          background: active ? "rgba(255,255,255,0.10)" : "transparent",
+                          color: "#fff",
+                          cursor: "pointer",
+                        }}
+                      >
+                        <span style={{ opacity: 0.7, marginRight: 8 }}>{i + 1}.</span>
+                        {label}
+                      </button>
+                    );
+                  })}
+                </div>
+              ) : (
+                <div style={{ opacity: 0.75 }}>No tracks.</div>
+              )}
+            </Section>
+          )}
         </div>
       </div>
 
@@ -679,7 +697,6 @@ export default function Account() {
             isPlaying={isPlaying}
             currentTime={currentTime}
             duration={duration}
-            playbackMode="full"
             onPlay={() => setIsPlaying(true)}
             onPause={() => setIsPlaying(false)}
             onTimeUpdate={(t) => setCurrentTime(t)}
@@ -690,6 +707,8 @@ export default function Account() {
             onNext={nextTrack}
             hasPrev={currentIndex > 0}
             hasNext={currentIndex < tracks.length - 1}
+            playbackMode={mode}
+            onPlaybackModeChange={setMode}
           />
         </Section>
       </div>

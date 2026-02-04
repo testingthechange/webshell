@@ -21,6 +21,7 @@ function getTrackSrc(t) {
  * - No Repeat / Shuffle
  * - Click track = plays immediately (one click)
  * - Own audio element (data-audio="account")
+ * - Playback mode toggle (Album / Smart Bridge) with pulsing active radio
  */
 export default function AccountPlayer({ tracks = [], initialIndex = 0 }) {
   const audioRef = useRef(null);
@@ -34,6 +35,9 @@ export default function AccountPlayer({ tracks = [], initialIndex = 0 }) {
   const [duration, setDuration] = useState(0);
   const [currentTime, setCurrentTime] = useState(0);
   const [error, setError] = useState("");
+
+  // Playback mode: "album" | "smartBridge"
+  const [playbackMode, setPlaybackMode] = useState("album");
 
   const activeTrack = safeTracks[index] || null;
   const activeSrc = getTrackSrc(activeTrack);
@@ -153,19 +157,26 @@ export default function AccountPlayer({ tracks = [], initialIndex = 0 }) {
 
     const rect = e.currentTarget.getBoundingClientRect();
     const x = clamp(e.clientX - rect.left, 0, rect.width);
-    const pct = rect.width ? x / rect.width : 0;
-    audio.currentTime = pct * duration;
+    const pctLocal = rect.width ? x / rect.width : 0;
+    audio.currentTime = pctLocal * duration;
   }
 
   const pct = duration > 0 ? clamp(currentTime / duration, 0, 1) : 0;
 
   return (
     <div>
+      {/* local CSS keyframes for pulsing active radio */}
+      <style>{`
+        @keyframes modePulse {
+          0% { transform: scale(1); opacity: 0.85; }
+          50% { transform: scale(1.25); opacity: 1; }
+          100% { transform: scale(1); opacity: 0.85; }
+        }
+      `}</style>
+
       <audio ref={audioRef} data-audio="account" preload="metadata" />
 
-      <div style={{ marginTop: 12, marginBottom: 10, fontWeight: 600 }}>
-        {title}
-      </div>
+      <div style={{ marginTop: 12, marginBottom: 10, fontWeight: 600 }}>{title}</div>
 
       <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 12 }}>
         <button type="button" onClick={prev} disabled={index <= 0} aria-label="Previous">
@@ -190,8 +201,71 @@ export default function AccountPlayer({ tracks = [], initialIndex = 0 }) {
           ▶▶
         </button>
 
-        <div style={{ marginLeft: "auto", opacity: 0.75, fontVariantNumeric: "tabular-nums" }}>
-          {formatTime(currentTime)} / {formatTime(duration)}
+        {/* Right side cluster: time on top, mode radios underneath */}
+        <div
+          style={{
+            marginLeft: "auto",
+            display: "flex",
+            flexDirection: "column",
+            alignItems: "flex-end",
+            gap: 6,
+            opacity: 0.92,
+            fontVariantNumeric: "tabular-nums",
+          }}
+        >
+          <div style={{ opacity: 0.75 }}>
+            {formatTime(currentTime)} / {formatTime(duration)}
+          </div>
+
+          <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
+            <label style={{ display: "flex", alignItems: "center", gap: 6, cursor: "pointer" }}>
+              <span
+                aria-hidden="true"
+                style={{
+                  width: 10,
+                  height: 10,
+                  borderRadius: 999,
+                  border: "1px solid rgba(255,255,255,0.55)",
+                  background: playbackMode === "album" ? "rgba(255,255,255,0.9)" : "transparent",
+                  animation: playbackMode === "album" ? "modePulse 1.2s ease-in-out infinite" : "none",
+                }}
+              />
+              <input
+                type="radio"
+                name="playbackMode"
+                value="album"
+                checked={playbackMode === "album"}
+                onChange={() => setPlaybackMode("album")}
+                style={{ display: "none" }}
+              />
+              <span style={{ fontSize: 12, opacity: 0.85 }}>Album</span>
+            </label>
+
+            <label style={{ display: "flex", alignItems: "center", gap: 6, cursor: "pointer" }}>
+              <span
+                aria-hidden="true"
+                style={{
+                  width: 10,
+                  height: 10,
+                  borderRadius: 999,
+                  border: "1px solid rgba(255,255,255,0.55)",
+                  background:
+                    playbackMode === "smartBridge" ? "rgba(255,255,255,0.9)" : "transparent",
+                  animation:
+                    playbackMode === "smartBridge" ? "modePulse 1.2s ease-in-out infinite" : "none",
+                }}
+              />
+              <input
+                type="radio"
+                name="playbackMode"
+                value="smartBridge"
+                checked={playbackMode === "smartBridge"}
+                onChange={() => setPlaybackMode("smartBridge")}
+                style={{ display: "none" }}
+              />
+              <span style={{ fontSize: 12, opacity: 0.85 }}>Smart Bridge</span>
+            </label>
+          </div>
         </div>
       </div>
 

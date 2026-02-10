@@ -1,11 +1,12 @@
-import { useState } from "react";
-import { useParams, useNavigate } from "react-router-dom";
+// FILE: src/routes/FakeCheckout.jsx
+import React from "react";
+import { useNavigate, useParams } from "react-router-dom";
 
 const COLLECTION_KEY = "bb_collection_v1";
 
-const API_BASE =
-  String(import.meta?.env?.VITE_API_BASE || "").trim().replace(/\/+$/, "") ||
-  "https://album-backend-kmuo.onrender.com";
+function safeString(v) {
+  return String(v ?? "").trim();
+}
 
 function safeParse(json) {
   try {
@@ -15,111 +16,118 @@ function safeParse(json) {
   }
 }
 
-function readCollection() {
+function readCollectionRaw() {
   const raw = localStorage.getItem(COLLECTION_KEY);
-  const arr = safeParse(raw || "[]");
-  return Array.isArray(arr) ? arr.filter(Boolean) : [];
+  const parsed = raw ? safeParse(raw) : null;
+  return Array.isArray(parsed) ? parsed : [];
 }
 
-function upsertCollectionEntry(entry) {
-  if (!entry?.shareId) return;
-  const existing = readCollection();
-  const next = [entry, ...existing.filter((a) => a?.shareId !== entry.shareId)].slice(0, 100);
-  localStorage.setItem(COLLECTION_KEY, JSON.stringify(next));
+function loadCollectionIds() {
+  const parsed = readCollectionRaw();
+  const out = [];
+
+  for (const x of parsed) {
+    if (!x) continue;
+    if (typeof x === "string") out.push(safeString(x));
+    else out.push(safeString(x?.shareId || x?.id || x?.share_id || x?.shareID || ""));
+  }
+
+  const seen = new Set();
+  const deduped = [];
+  for (const id of out) {
+    const v = safeString(id);
+    if (!v || seen.has(v)) continue;
+    seen.add(v);
+    deduped.push(v);
+  }
+  return deduped;
+}
+
+function saveCollectionIds(ids) {
+  const cleaned = [];
+  const seen = new Set();
+  for (const x of ids || []) {
+    const id = safeString(x);
+    if (!id || seen.has(id)) continue;
+    seen.add(id);
+    cleaned.push(id);
+  }
+  localStorage.setItem(COLLECTION_KEY, JSON.stringify(cleaned));
+  return cleaned;
+}
+
+function ensureShareIdInCollection(shareId) {
+  const id = safeString(shareId);
+  if (!id) return [];
+  const existing = loadCollectionIds();
+  const next = [id, ...existing.filter((x) => x !== id)];
+  return saveCollectionIds(next);
 }
 
 export default function FakeCheckout() {
-  const { shareId } = useParams();
-  const navigate = useNavigate();
+  const nav = useNavigate();
+  const params = useParams();
+  const shareId = safeString(params?.shareId || params?.id || "");
 
-  const [loading, setLoading] = useState(false);
-  const [err, setErr] = useState("");
+  function buy() {
+    if (!shareId) return;
 
-  const handleFakeBuy = async () => {
-    const id = String(shareId || "").trim();
-    if (!id) return;
-
-    setErr("");
-    setLoading(true);
+    ensureShareIdInCollection(shareId);
 
     try {
-      // 1) Validate: must be a REAL published shareId
-      const url = `${API_BASE}/publish/${encodeURIComponent(id)}.json`;
-      const r = await fetch(url, { cache: "no-store" });
+      sessionStorage.setItem(
+        "bb_last_purchase_v1",
+        JSON.stringify({ shareId, ts: Date.now() })
+      );
+    } catch {}
 
-      const j = await r.json().catch(() => ({}));
-      if (!r.ok || !j?.snapshot) {
-        throw new Error(
-          `This album is not published (shareId not found). Please publish first.\n` +
-            `GET /publish/${id}.json -> HTTP ${r.status}`
-        );
-      }
-
-      // 2) Hydrate minimal collection entry (thumbnail comes from coverS3Key)
-      const snap = j.snapshot || {};
-      const meta = snap?.album?.meta || snap?.album?.masterSave?.meta || {};
-      const cover = snap?.album?.cover || snap?.album?.masterSave?.cover || {};
-
-      const entry = {
-        shareId: id,
-        projectId: String(j?.projectId || snap?.projectId || ""),
-        title: String(meta?.albumTitle || snap?.projectName || "Album"),
-        artist: String(meta?.artistName || snap?.company || ""),
-        coverS3Key: String(cover?.s3Key || ""),
-        purchasedAt: new Date().toISOString(),
-      };
-
-      upsertCollectionEntry(entry);
-      localStorage.setItem(`mock_owned:${id}`, "1");
-
-      // 3) Go to account
-      navigate(`/account/${id}?purchased=1`);
-    } catch (e) {
-      // IMPORTANT: do NOT mark owned, do NOT add to collection
-      setErr(e?.message || String(e));
-    } finally {
-      setLoading(false);
-    }
-  };
+    nav(`/account/${shareId}?purchased=1`, { replace: true });
+  }
 
   return (
-    <div className="main-content" style={{ maxWidth: 560, margin: "0 auto" }}>
-      <div className="page-title">Checkout</div>
-      <div className="page-heading">Confirm Purchase</div>
+    <div style={{ maxWidth: 920, margin: "0 auto", padding: "26px 18px" }}>
+      <div style={{ fontWeight: 900, fontSize: 20 }}>Fake Checkout</div>
 
-      <div className="card" style={{ marginTop: 24 }}>
-        <div className="card-header">Fake Checkout</div>
+      <div style={{ marginTop: 10, opacity: 0.82 }}>
+        Clicking buy will add this album to <b>My Collection</b> and redirect to your Account page.
+      </div>
 
-        <div style={{ opacity: 0.8, marginBottom: 16, lineHeight: 1.5 }}>
-          Temporary checkout flow for development.
-          <br />
-          Clicking buy will add this album to <b>My Collection</b> and redirect to your Account page.
-        </div>
+      <div style={{ marginTop: 12, fontFamily: "monospace", opacity: 0.75 }}>
+        shareId: {shareId || "—"}
+      </div>
 
-        {err ? (
-          <div
-            style={{
-              marginBottom: 14,
-              padding: 12,
-              borderRadius: 12,
-              border: "1px solid rgba(255,255,255,0.14)",
-              background: "rgba(255,255,255,0.06)",
-              whiteSpace: "pre-wrap",
-            }}
-          >
-            {err}
-          </div>
-        ) : null}
-
-        <button className="buy-button" onClick={handleFakeBuy} disabled={!shareId || loading}>
-          {loading ? "Checking publish…" : "Buy (Fake)"}
+      <div style={{ marginTop: 18, display: "flex", gap: 10 }}>
+        <button
+          type="button"
+          onClick={() => nav(-1)}
+          style={{
+            padding: "10px 12px",
+            borderRadius: 12,
+            border: "1px solid rgba(255,255,255,0.18)",
+            background: "rgba(255,255,255,0.06)",
+            color: "rgba(255,255,255,0.92)",
+            cursor: "pointer",
+            fontWeight: 900,
+          }}
+        >
+          Back
         </button>
 
-        <div style={{ marginTop: 16, fontSize: 12, opacity: 0.65, lineHeight: 1.4 }}>
-          Future:
-          <br />• Directus credit card checkout (placeholder)
-          <br />• Polygon NFT mint + assignment (placeholder)
-        </div>
+        <button
+          type="button"
+          onClick={buy}
+          style={{
+            padding: "10px 12px",
+            borderRadius: 12,
+            border: "1px solid rgba(255,255,255,0.22)",
+            background: "rgba(255,255,255,0.14)",
+            color: "rgba(255,255,255,0.92)",
+            cursor: "pointer",
+            fontWeight: 900,
+          }}
+        >
+          Buy (mock) → Add to My Collection → Go to Account
+        </button>
       </div>
     </div>
   );

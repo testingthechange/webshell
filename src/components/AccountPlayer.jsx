@@ -1,337 +1,1026 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+// FILE: src/routes/Account.jsx
+import React, { useEffect, useMemo, useRef, useState } from "react";
+import { useNavigate, useParams, useSearchParams } from "react-router-dom";
+import AccountPlayerBar from "../components/AccountPlayerBar.jsx";
+import loadManifest from "../lib/loadManifest.js";
 
-function clamp(n, min, max) {
-  return Math.max(min, Math.min(max, n));
+// Smart Bridge (account-only)
+import SmartBridgeCard from "../components/account/SmartBridgeCard.jsx";
+import { useAccountPlaybackMode } from "../components/account/useAccountPlaybackMode.js";
+import { useSmartBridgePlayback } from "../components/account/useSmartBridgePlayback.js";
+
+const COLLECTION_KEY = "bb_collection_v1";
+
+const API_BASE =
+  String(import.meta?.env?.VITE_API_BASE || "")
+    .trim()
+    .replace(/\/+$/, "") || "https://album-backend-kmuo.onrender.com";
+
+/* ---------------- helpers ---------------- */
+
+function safeString(v) {
+  return String(v ?? "").trim();
 }
 
-function formatTime(sec) {
-  if (!Number.isFinite(sec) || sec < 0) return "0:00";
-  const s = Math.floor(sec);
-  const m = Math.floor(s / 60);
-  const r = s % 60;
-  return `${m}:${String(r).padStart(2, "0")}`;
+function safeParse(json) {
+  try {
+    return JSON.parse(json);
+  } catch {
+    return null;
+  }
 }
 
-function getTrackSrc(t) {
-  return t?.playbackUrl || t?.url || t?.audioUrl || t?.src || "";
+function readCollectionRaw() {
+  const raw = localStorage.getItem(COLLECTION_KEY);
+  const parsed = raw ? safeParse(raw) : null;
+  return Array.isArray(parsed) ? parsed : [];
 }
 
-/**
- * Account player (minimal)
- * - No Repeat / Shuffle
- * - Click track = plays immediately (one click)
- * - Own audio element (data-audio="account")
- * - Playback mode toggle (Album / Smart Bridge) with pulsing active radio
- */
-export default function AccountPlayer({ tracks = [], initialIndex = 0 }) {
-  const audioRef = useRef(null);
+function loadCollectionIds() {
+  const parsed = readCollectionRaw();
+  const out = [];
 
-  const safeTracks = useMemo(() => (Array.isArray(tracks) ? tracks : []), [tracks]);
-  const [index, setIndex] = useState(
-    clamp(initialIndex, 0, Math.max(0, safeTracks.length - 1))
+  for (const x of parsed) {
+    if (!x) continue;
+    if (typeof x === "string") out.push(safeString(x));
+    else out.push(safeString(x?.shareId || x?.id || x?.share_id || x?.shareID || ""));
+  }
+
+  const seen = new Set();
+  const deduped = [];
+  for (const id of out) {
+    const v = safeString(id);
+    if (!v || seen.has(v)) continue;
+    seen.add(v);
+    deduped.push(v);
+  }
+  return deduped;
+}
+
+function saveCollectionIds(ids) {
+  const cleaned = [];
+  const seen = new Set();
+  for (const x of ids || []) {
+    const id = safeString(x);
+    if (!id || seen.has(id)) continue;
+    seen.add(id);
+    cleaned.push(id);
+  }
+  localStorage.setItem(COLLECTION_KEY, JSON.stringify(cleaned));
+  return cleaned;
+}
+
+function ensureShareIdInCollection(shareId) {
+  const id = safeString(shareId);
+  if (!id) return [];
+  const existing = loadCollectionIds();
+  const next = [id, ...existing.filter((x) => x !== id)];
+  return saveCollectionIds(next);
+}
+
+// IMPORTANT: "Owned" should be true if either:
+// - mock_owned:<id> is set
+// - OR the id is in bb_collection_v1
+function isOwned(shareId, collectionIdsOverride) {
+  const id = safeString(shareId);
+  if (!id) return false;
+
+  try {
+    if (localStorage.getItem(`mock_owned:${id}`) === "1") return true;
+  } catch {}
+
+  const ids = Array.isArray(collectionIdsOverride) ? collectionIdsOverride : loadCollectionIds();
+  return ids.includes(id);
+}
+
+async function fetchJson(url) {
+  const r = await fetch(url, { cache: "no-store" });
+  const j = await r.json().catch(() => null);
+  if (!r.ok) throw new Error((j && (j.error || j.message)) || `HTTP ${r.status}`);
+  return j;
+}
+
+async function signUrl(s3Key) {
+  const key = safeString(s3Key);
+  if (!key) return "";
+  const j = await fetchJson(`${API_BASE}/api/playback-url?s3Key=${encodeURIComponent(key)}`);
+  return safeString(j?.url || j?.playbackUrl || "");
+}
+
+function pickTitle(m) {
+  return (
+    safeString(m?.title) ||
+    safeString(m?.name) ||
+    safeString(m?.album?.title) ||
+    safeString(m?.album?.name) ||
+    safeString(m?.meta?.albumTitle) ||
+    "Untitled"
   );
+}
 
+function pickArtist(m) {
+  return (
+    safeString(m?.artist) ||
+    safeString(m?.album?.artist) ||
+    safeString(m?.meta?.artist) ||
+    "Unknown artist"
+  );
+}
+
+function pickDescription(m) {
+  return (
+    safeString(m?.description) ||
+    safeString(m?.album?.description) ||
+    safeString(m?.meta?.description) ||
+    ""
+  );
+}
+
+function pickCoverKey(m) {
+  return (
+    safeString(m?.coverS3Key) ||
+    safeString(m?.album?.coverKey) ||
+    safeString(m?.coverKey) ||
+    safeString(m?.artworkKey) ||
+    safeString(m?.album?.artworkKey) ||
+    ""
+  );
+}
+
+function pickTracks(m) {
+  if (Array.isArray(m?.tracks)) return m.tracks;
+  if (Array.isArray(m?.album?.tracks)) return m.album.tracks;
+  if (Array.isArray(m?.catalog?.songs)) return m.catalog.songs;
+  if (Array.isArray(m?.project?.catalog?.songs)) return m.project.catalog.songs;
+  return [];
+}
+
+function pickConnections(m) {
+  return (
+    m?.snapshot?.songs?.connections ||
+    m?.songs?.connections ||
+    m?.snapshot?.project?.songs?.connections ||
+    {}
+  );
+}
+
+function pickTrackAudioKey(t) {
+  return (
+    safeString(t?.s3Key) ||
+    safeString(t?.audioS3Key) ||
+    safeString(t?.trackS3Key) ||
+    safeString(t?.playbackKey) ||
+    safeString(t?.fileKey) ||
+    safeString(t?.audioKey) ||
+    ""
+  );
+}
+
+function trackId(t, i) {
+  return safeString(t?.id) || safeString(t?.s3Key) || safeString(t?.audioS3Key) || `track:${i}`;
+}
+
+function pickTrackTitle(t, i) {
+  return safeString(t?.title) || safeString(t?.name) || `Track ${i + 1}`;
+}
+
+function pickTrackSlot(t, i) {
+  const v = Number(t?.slot);
+  if (Number.isFinite(v) && v > 0) return v;
+  return i + 1;
+}
+
+/* ---------------- component ---------------- */
+
+export default function Account() {
+  const nav = useNavigate();
+  const params = useParams();
+  const [sp] = useSearchParams();
+
+  const routeShareId =
+    safeString(params?.shareId) ||
+    safeString(params?.id) ||
+    safeString(params?.shareid) ||
+    safeString(params?.shareID) ||
+    safeString(sp.get("shareId")) ||
+    safeString(sp.get("id"));
+
+  const purchasedFlag = safeString(sp.get("purchased")) === "1";
+
+  const audioRef = useRef(null); // SONG audio
+  const bridgeAudioRef = useRef(null); // BRIDGE audio
+
+  // Existing file uses collection objects (shareId/title/artist/coverUrl etc.)
+  // Keep that model. We’ll refresh it from localStorage on open.
+  const [collection, setCollection] = useState([]);
+  const [collectionOpen, setCollectionOpen] = useState(false);
+
+  // cover url cache per shareId
+  const [signedCovers, setSignedCovers] = useState({}); // { [shareId]: signedUrl }
+
+  const [shareId, setShareId] = useState("");
+  const [manifest, setManifest] = useState(null);
+  const [pageCoverUrl, setPageCoverUrl] = useState("");
+  const [tracks, setTracks] = useState([]);
+  const [connections, setConnections] = useState({});
+
+  const [currentIndex, setCurrentIndex] = useState(0);
+  const [currentTrack, setCurrentTrack] = useState(null);
   const [isPlaying, setIsPlaying] = useState(false);
-  const [duration, setDuration] = useState(0);
   const [currentTime, setCurrentTime] = useState(0);
+  const [duration, setDuration] = useState(0);
+
   const [error, setError] = useState("");
 
-  // Playback mode: "album" | "smartBridge"
-  const [playbackMode, setPlaybackMode] = useState("album");
+  // derived ids list from localStorage (needed for owned + purchase landing)
+  const [collectionIds, setCollectionIds] = useState(() => loadCollectionIds());
 
-  const activeTrack = safeTracks[index] || null;
-  const activeSrc = getTrackSrc(activeTrack);
-  const title = activeTrack?.title || activeTrack?.name || `Track ${index + 1}`;
+  const owned = useMemo(() => isOwned(shareId, collectionIds), [shareId, collectionIds.join("|")]);
 
-  // Keep index valid if tracks change.
+  // Account-only playback mode (Album vs Smart Bridge), persisted per shareId
+  const { mode, setMode } = useAccountPlaybackMode({ shareId });
+
+  /* ---------- Smart Bridge: Now Playing + highlight state ---------- */
+
+  const [sbNowPlayingLabel, setSbNowPlayingLabel] = useState("");
+  const [sbActiveSlot, setSbActiveSlot] = useState(null); // number|null
+  const [sbHighlightVisible, setSbHighlightVisible] = useState(false);
+  const sbHighlightTimerRef = useRef(null);
+
+  function clearSbHighlightTimer() {
+    if (sbHighlightTimerRef.current) {
+      clearTimeout(sbHighlightTimerRef.current);
+      sbHighlightTimerRef.current = null;
+    }
+  }
+
+  function bumpSmartBridgeNowPlaying(t, i) {
+    const slot = pickTrackSlot(t, i);
+    const title = pickTrackTitle(t, i);
+    setSbActiveSlot(slot);
+    setSbNowPlayingLabel(`${slot}. ${title}`);
+
+    setSbHighlightVisible(true);
+    clearSbHighlightTimer();
+    sbHighlightTimerRef.current = setTimeout(() => {
+      setSbHighlightVisible(false);
+      sbHighlightTimerRef.current = null;
+    }, 100_000);
+  }
+
+  function stopBridgeAudio() {
+    const b = bridgeAudioRef.current;
+    if (!b) return;
+    try {
+      b.pause?.();
+    } catch {}
+    try {
+      b.removeAttribute("src");
+      b.load?.();
+    } catch {}
+  }
+
+  /* ---------- localStorage sync ---------- */
+
   useEffect(() => {
-    setIndex((i) => clamp(i, 0, Math.max(0, safeTracks.length - 1)));
-  }, [safeTracks.length]);
-
-  // Wire audio events.
-  useEffect(() => {
-    const audio = audioRef.current;
-    if (!audio) return;
-
-    const onLoadedMetadata = () =>
-      setDuration(Number.isFinite(audio.duration) ? audio.duration : 0);
-    const onTimeUpdate = () => setCurrentTime(audio.currentTime || 0);
-    const onPlay = () => setIsPlaying(true);
-    const onPause = () => setIsPlaying(false);
-    const onEnded = () => setIsPlaying(false);
-
-    const onError = () => {
-      const mediaErr = audio.error;
-      setError(mediaErr ? `Audio error (${mediaErr.code})` : "Audio error");
-      setIsPlaying(false);
+    const onStorage = (e) => {
+      if (e?.key === COLLECTION_KEY) {
+        setCollectionIds(loadCollectionIds());
+      }
     };
-
-    audio.addEventListener("loadedmetadata", onLoadedMetadata);
-    audio.addEventListener("timeupdate", onTimeUpdate);
-    audio.addEventListener("play", onPlay);
-    audio.addEventListener("pause", onPause);
-    audio.addEventListener("ended", onEnded);
-    audio.addEventListener("error", onError);
-
-    return () => {
-      audio.removeEventListener("loadedmetadata", onLoadedMetadata);
-      audio.removeEventListener("timeupdate", onTimeUpdate);
-      audio.removeEventListener("play", onPlay);
-      audio.removeEventListener("pause", onPause);
-      audio.removeEventListener("ended", onEnded);
-      audio.removeEventListener("error", onError);
-    };
+    window.addEventListener("storage", onStorage);
+    return () => window.removeEventListener("storage", onStorage);
   }, []);
 
-  function hardPlay(src) {
-    const audio = audioRef.current;
-    if (!audio) return;
+  /* ---------- purchase landing self-heal ---------- */
 
-    setError("");
+  useEffect(() => {
+    const id = safeString(routeShareId);
+    if (!id) return;
 
-    if (!src) {
-      audio.pause();
-      audio.removeAttribute("src");
+    const existing = loadCollectionIds();
+
+    let shouldAdd = false;
+
+    if (purchasedFlag) shouldAdd = true;
+
+    if (!shouldAdd) {
+      try {
+        const raw = sessionStorage.getItem("bb_last_purchase_v1");
+        const j = raw ? safeParse(raw) : null;
+        const sid = safeString(j?.shareId);
+        const ts = Number(j?.ts || 0);
+        if (sid && sid === id && Number.isFinite(ts) && Date.now() - ts < 10 * 60 * 1000) {
+          shouldAdd = true;
+          sessionStorage.removeItem("bb_last_purchase_v1");
+        }
+      } catch {}
+    }
+
+    if (!shouldAdd && existing.length === 0) shouldAdd = true;
+    if (!shouldAdd) return;
+
+    ensureShareIdInCollection(id);
+    try {
+      localStorage.setItem(`mock_owned:${id}`, "1");
+    } catch {}
+
+    setCollectionIds(loadCollectionIds());
+  }, [routeShareId, purchasedFlag]);
+
+  /* ---------- load active page album ---------- */
+
+  useEffect(() => {
+    let cancelled = false;
+
+    (async () => {
+      const id = safeString(routeShareId);
+      setShareId(id);
+      setError("");
+      setManifest(null);
+      setPageCoverUrl("");
+      setTracks([]);
+      setConnections({});
+      setCurrentIndex(0);
+      setCurrentTrack(null);
       setIsPlaying(false);
+      setCurrentTime(0);
+      setDuration(0);
+
+      setSbNowPlayingLabel("");
+      setSbActiveSlot(null);
+      setSbHighlightVisible(false);
+      clearSbHighlightTimer();
+
+      // stop audio
+      const a = audioRef.current;
+      if (a) {
+        try {
+          a.pause?.();
+        } catch {}
+        a.removeAttribute("src");
+        try {
+          a.load?.();
+        } catch {}
+      }
+      stopBridgeAudio();
+
+      if (!id) return;
+
+      try {
+        const m = await loadManifest(id);
+        if (cancelled) return;
+
+        setManifest(m);
+
+        const list = pickTracks(m);
+        setTracks(list);
+
+        setConnections(pickConnections(m));
+
+        if (list.length) {
+          setCurrentIndex(0);
+          setCurrentTrack(list[0]);
+        }
+
+        const coverKey = pickCoverKey(m);
+        const url = coverKey ? await signUrl(coverKey) : "";
+        if (!cancelled) setPageCoverUrl(url || "");
+      } catch (e) {
+        if (!cancelled) setError(String(e?.message || e));
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+      clearSbHighlightTimer();
+      stopBridgeAudio();
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [routeShareId]);
+
+  /* ---------- navigation helpers ---------- */
+
+  function selectTrack(i) {
+    const t = tracks?.[i];
+    if (!t) return;
+
+    // manual selection cancels bridge
+    stopBridgeAudio();
+
+    setCurrentIndex(i);
+    setCurrentTrack(t);
+
+    if (mode === "smartBridge") {
+      bumpSmartBridgeNowPlaying(t, i);
+    } else {
+      setSbNowPlayingLabel("");
+      setSbActiveSlot(null);
+      setSbHighlightVisible(false);
+      clearSbHighlightTimer();
+    }
+
+    setIsPlaying(true);
+    try {
+      audioRef.current?.play?.().catch(() => {});
+    } catch {}
+  }
+
+  function prevTrack() {
+    if (currentIndex > 0) selectTrack(currentIndex - 1);
+  }
+
+  function nextTrack() {
+    if (currentIndex < tracks.length - 1) selectTrack(currentIndex + 1);
+  }
+
+  function onSeek(t) {
+    const a = audioRef.current;
+    if (!a) return;
+    a.currentTime = t;
+    setCurrentTime(t);
+  }
+
+  /* ---------- Smart Bridge authority (REAL bridge audio) ---------- */
+
+  const { handleSongEnded, phase } = useSmartBridgePlayback({
+    songAudioRef: audioRef,
+    bridgeAudioRef,
+    tracks,
+    connections,
+    signUrl,
+    mode,
+    isPlaying,
+    currentIndex,
+    currentTrack,
+    selectTrack,
+    setIsPlaying,
+  });
+
+  /* ---------- bind SONG audio src ---------- */
+
+  useEffect(() => {
+    let cancelled = false;
+
+    (async () => {
+      const a = audioRef.current;
+      const t = currentTrack;
+      if (!a || !t) return;
+
+      const key = pickTrackAudioKey(t);
+      if (!key) return;
+
+      try {
+        const url = await signUrl(key);
+        if (cancelled || !url) return;
+
+        if (a.src !== url) {
+          a.src = url;
+          try {
+            a.load?.();
+          } catch {}
+        }
+
+        if (isPlaying) {
+          a.play?.().catch(() => {});
+        }
+      } catch {}
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [currentTrack, isPlaying]);
+
+  /* ---------- SB Now Playing: show phase ---------- */
+
+  useEffect(() => {
+    if (mode !== "smartBridge") return;
+
+    if (phase === "bridge") {
+      setSbNowPlayingLabel("→ bridge");
+      setSbActiveSlot(null);
+      setSbHighlightVisible(false);
+      clearSbHighlightTimer();
       return;
     }
 
-    // Do NOT call audio.load() here; it can interrupt play() and cause the "needs 2 clicks" symptom.
-    // Set src + play inside the same user gesture.
-    audio.pause();
-    audio.currentTime = 0;
+    // phase === "song"
+    if (currentTrack) bumpSmartBridgeNowPlaying(currentTrack, currentIndex);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mode, phase, currentIndex, currentTrack]);
 
-    if (audio.src !== src) {
-      audio.src = src;
+  /* ---------- collection model + cover signing ---------- */
+
+  function readCollection() {
+    // Your existing app stores either:
+    // - bb_collection_v1 (array of shareIds)
+    // - mock_library (array of {shareId,title,artist,coverUrl,...})
+    // Prefer mock_library for title/artist if present, fallback to ids list.
+    const ids = loadCollectionIds();
+
+    let lib = [];
+    try {
+      const raw = localStorage.getItem("mock_library");
+      const parsed = raw ? safeParse(raw) : null;
+      if (Array.isArray(parsed)) lib = parsed;
+    } catch {}
+
+    const byId = new Map();
+    for (const x of lib) {
+      const sid = safeString(x?.shareId || x?.id);
+      if (!sid) continue;
+      byId.set(sid, x);
     }
 
-    // Set intent immediately; UI should reflect user action
-    setIsPlaying(true);
-
-    audio.play().catch((e) => {
-      setIsPlaying(false);
-      setError(String(e?.message || e));
+    return ids.map((sid) => {
+      const x = byId.get(sid) || {};
+      return {
+        shareId: sid,
+        title: safeString(x?.title) || "Album",
+        artist: safeString(x?.artist) || "",
+        coverUrl: safeString(x?.coverUrl) || "",
+        purchasedAt: x?.purchasedAt || "",
+      };
     });
   }
 
-  function togglePlay() {
-    const audio = audioRef.current;
-    if (!audio) return;
+  function openCollection() {
+    const next = readCollection();
+    setCollection(next);
+    setCollectionOpen(true);
+  }
 
-    setError("");
+  function collectionCoverUrl(a) {
+    const id = safeString(a?.shareId);
+    return safeString(signedCovers?.[id] || "");
+  }
 
-    if (audio.paused) {
-      if (!audio.src && activeSrc) {
-        hardPlay(activeSrc);
-        return;
+  // IMPORTANT: whenever collection list changes (or popup opens), sign covers for missing ones
+  useEffect(() => {
+    let cancelled = false;
+
+    (async () => {
+      const ids = (collection || [])
+        .map((a) => safeString(a?.shareId))
+        .filter(Boolean);
+
+      for (const id of ids) {
+        if (cancelled) return;
+        if (signedCovers[id]) continue;
+
+        try {
+          const m = await loadManifest(id);
+          if (cancelled) return;
+
+          const coverKey = pickCoverKey(m);
+          if (!coverKey) continue;
+
+          const url = await signUrl(coverKey);
+          if (cancelled || !url) continue;
+
+          setSignedCovers((prev) => ({ ...prev, [id]: url }));
+        } catch {
+          // ignore
+        }
       }
-      audio.play().catch((e) => {
-        setIsPlaying(false);
-        setError(String(e?.message || e));
-      });
-    } else {
-      audio.pause();
-      setIsPlaying(false);
-    }
-  }
+    })();
 
-  function prev() {
-    if (safeTracks.length === 0) return;
-    const nextIndex = clamp(index - 1, 0, Math.max(0, safeTracks.length - 1));
-    const nextSrc = getTrackSrc(safeTracks[nextIndex]);
-    hardPlay(nextSrc);
-    setIndex(nextIndex);
-  }
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [collectionOpen, collection.map((x) => safeString(x?.shareId)).join("|")]);
 
-  function next() {
-    if (safeTracks.length === 0) return;
-    const nextIndex = clamp(index + 1, 0, Math.max(0, safeTracks.length - 1));
-    const nextSrc = getTrackSrc(safeTracks[nextIndex]);
-    hardPlay(nextSrc);
-    setIndex(nextIndex);
-  }
-
-  function seekByClick(e) {
-    const audio = audioRef.current;
-    if (!audio || !duration) return;
-
-    const rect = e.currentTarget.getBoundingClientRect();
-    const x = clamp(e.clientX - rect.left, 0, rect.width);
-    const pctLocal = rect.width ? x / rect.width : 0;
-    audio.currentTime = pctLocal * duration;
-  }
-
-  const pct = duration > 0 ? clamp(currentTime / duration, 0, 1) : 0;
+  const title = pickTitle(manifest) || "Account";
+  const artist = pickArtist(manifest) || "";
+  const description = pickDescription(manifest) || "";
 
   return (
-    <div>
-      {/* local CSS keyframes for pulsing active radio */}
-      <style>{`
-        @keyframes modePulse {
-          0% { transform: scale(1); opacity: 0.85; }
-          50% { transform: scale(1.25); opacity: 1; }
-          100% { transform: scale(1); opacity: 0.85; }
-        }
-      `}</style>
+    <div style={{ width: "70%", maxWidth: 1320, margin: "0 auto", padding: "28px 0" }}>
+      {/* SONG AUDIO */}
+      <audio
+        ref={audioRef}
+        preload="metadata"
+        style={{ display: "none" }}
+        onTimeUpdate={(e) => setCurrentTime(e.currentTarget.currentTime)}
+        onLoadedMetadata={(e) => setDuration(e.currentTarget.duration || 0)}
+        onEnded={handleSongEnded}
+      />
 
-      <audio ref={audioRef} data-audio="account" preload="metadata" />
+      {/* BRIDGE AUDIO (separate element) */}
+      <audio ref={bridgeAudioRef} preload="metadata" style={{ display: "none" }} />
 
-      <div style={{ marginTop: 12, marginBottom: 10, fontWeight: 600 }}>{title}</div>
+      {error ? (
+        <Section title="Error">
+          <div style={{ opacity: 0.85, whiteSpace: "pre-wrap" }}>{error}</div>
+        </Section>
+      ) : null}
 
-      <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 12 }}>
-        <button type="button" onClick={prev} disabled={index <= 0} aria-label="Previous">
-          ◀◀
-        </button>
-
-        <button
-          type="button"
-          onClick={togglePlay}
-          disabled={!activeSrc}
-          aria-label={isPlaying ? "Pause" : "Play"}
+      {/* MY COLLECTION THUMBNAIL ROW */}
+      {collection.length ? (
+        <Section
+          title="My Collection"
+          right={
+            <button type="button" onClick={openCollection} style={smallLinkBtn}>
+              View all
+            </button>
+          }
         >
-          {isPlaying ? "❚❚" : "▶"}
-        </button>
+          <div style={{ display: "flex", gap: 14, overflowX: "auto", paddingBottom: 4 }}>
+            {collection.map((a, idx) => {
+              const img = collectionCoverUrl(a);
+              const sid = safeString(a?.shareId) || `item:${idx}`;
+              return (
+                <button
+                  key={`${sid}:${idx}`}
+                  type="button"
+                  onClick={() => a?.shareId && nav(`/account/${a.shareId}`)}
+                  style={thumbItem}
+                >
+                  <div style={thumbBox}>
+                    {img ? (
+                      <img
+                        src={img}
+                        alt=""
+                        style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }}
+                      />
+                    ) : (
+                      <div style={coverPlaceholder}>COVER</div>
+                    )}
+                  </div>
 
-        <button
-          type="button"
-          onClick={next}
-          disabled={index >= safeTracks.length - 1}
-          aria-label="Next"
-        >
-          ▶▶
-        </button>
-
-        {/* Right side cluster: time on top, mode radios underneath */}
-        <div
-          style={{
-            marginLeft: "auto",
-            display: "flex",
-            flexDirection: "column",
-            alignItems: "flex-end",
-            gap: 6,
-            opacity: 0.92,
-            fontVariantNumeric: "tabular-nums",
-          }}
-        >
-          <div style={{ opacity: 0.75 }}>
-            {formatTime(currentTime)} / {formatTime(duration)}
+                  <div style={{ fontWeight: 800, fontSize: 12, marginTop: 6 }}>{a?.title || "Album"}</div>
+                  {a?.artist ? <div style={{ opacity: 0.7, fontSize: 11, marginTop: 2 }}>{a.artist}</div> : null}
+                </button>
+              );
+            })}
           </div>
+        </Section>
+      ) : null}
 
-          <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
-            <label style={{ display: "flex", alignItems: "center", gap: 6, cursor: "pointer" }}>
-              <span
-                aria-hidden="true"
-                style={{
-                  width: 10,
-                  height: 10,
-                  borderRadius: 999,
-                  border: "1px solid rgba(255,255,255,0.55)",
-                  background: playbackMode === "album" ? "rgba(255,255,255,0.9)" : "transparent",
-                  animation: playbackMode === "album" ? "modePulse 1.2s ease-in-out infinite" : "none",
-                }}
-              />
-              <input
-                type="radio"
-                name="playbackMode"
-                value="album"
-                checked={playbackMode === "album"}
-                onChange={() => setPlaybackMode("album")}
-                style={{ display: "none" }}
-              />
-              <span style={{ fontSize: 12, opacity: 0.85 }}>Album</span>
-            </label>
-
-            <label style={{ display: "flex", alignItems: "center", gap: 6, cursor: "pointer" }}>
-              <span
-                aria-hidden="true"
-                style={{
-                  width: 10,
-                  height: 10,
-                  borderRadius: 999,
-                  border: "1px solid rgba(255,255,255,0.55)",
-                  background:
-                    playbackMode === "smartBridge" ? "rgba(255,255,255,0.9)" : "transparent",
-                  animation:
-                    playbackMode === "smartBridge" ? "modePulse 1.2s ease-in-out infinite" : "none",
-                }}
-              />
-              <input
-                type="radio"
-                name="playbackMode"
-                value="smartBridge"
-                checked={playbackMode === "smartBridge"}
-                onChange={() => setPlaybackMode("smartBridge")}
-                style={{ display: "none" }}
-              />
-              <span style={{ fontSize: 12, opacity: 0.85 }}>Smart Bridge</span>
-            </label>
-          </div>
-        </div>
-      </div>
-
-      <div
-        onClick={seekByClick}
-        role="button"
-        tabIndex={0}
-        style={{
-          height: 10,
-          borderRadius: 999,
-          background: "rgba(255,255,255,0.12)",
-          cursor: duration ? "pointer" : "default",
-          position: "relative",
-          overflow: "hidden",
-          marginBottom: 12,
-        }}
-      >
-        <div
-          style={{
-            width: `${pct * 100}%`,
-            height: "100%",
-            background: "rgba(255,255,255,0.7)",
-          }}
-        />
-      </div>
-
-      {safeTracks.length ? (
-        <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-          {safeTracks.map((t, i) => {
-            const label = t?.title || t?.name || `Track ${i + 1}`;
-            const active = i === index;
-            const nextSrc = getTrackSrc(t);
-
-            return (
-              <button
-                key={t?.id || t?.trackId || `${label}-${i}`}
-                type="button"
-                onClick={(e) => {
-                  e.preventDefault();
-                  e.stopPropagation();
-
-                  // Play first (user gesture), then update UI selection.
-                  hardPlay(nextSrc);
-                  setIndex(i);
-                }}
-                style={{
-                  textAlign: "left",
-                  padding: "10px 12px",
-                  borderRadius: 10,
-                  border: "1px solid rgba(255,255,255,0.12)",
-                  background: active ? "rgba(255,255,255,0.10)" : "transparent",
-                  color: "inherit",
-                  cursor: "pointer",
-                }}
-              >
-                <span style={{ opacity: 0.7, marginRight: 8 }}>{i + 1}.</span>
-                {label}
+      {/* COLLECTION POPUP */}
+      {collectionOpen ? (
+        <div style={popupOverlay} onMouseDown={() => setCollectionOpen(false)}>
+          <div style={popupCard} onMouseDown={(e) => e.stopPropagation()}>
+            <div style={popupHeader}>
+              <div style={{ fontWeight: 900 }}>My Collection</div>
+              <button type="button" onClick={() => setCollectionOpen(false)} style={closeBtn} aria-label="Close">
+                ✕
               </button>
-            );
-          })}
-        </div>
-      ) : (
-        <div style={{ opacity: 0.75 }}>No tracks.</div>
-      )}
+            </div>
 
-      {error ? <div style={{ marginTop: 10, color: "#b00020" }}>Error: {error}</div> : null}
+            <div style={{ padding: 12 }}>
+              {collection.length ? (
+                <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+                  {collection.map((a, idx) => {
+                    const img = collectionCoverUrl(a);
+                    const sid = safeString(a?.shareId) || `row:${idx}`;
+                    return (
+                      <button
+                        key={`${sid}:${idx}`}
+                        type="button"
+                        onClick={() => {
+                          setCollectionOpen(false);
+                          if (a?.shareId) nav(`/account/${a.shareId}`);
+                        }}
+                        style={albumRow}
+                      >
+                        <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
+                          <div style={thumbSmall}>
+                            {img ? (
+                              <img
+                                src={img}
+                                alt=""
+                                style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }}
+                              />
+                            ) : (
+                              <div style={coverPlaceholderSmall}>COVER</div>
+                            )}
+                          </div>
+
+                          <div style={{ textAlign: "left" }}>
+                            <div style={{ fontWeight: 900 }}>{a?.title || "Album"}</div>
+                            <div style={{ opacity: 0.75, fontSize: 12 }}>{a?.artist || ""}</div>
+                            <div style={{ opacity: 0.55, fontSize: 12 }}>{a?.shareId || ""}</div>
+                          </div>
+                        </div>
+                      </button>
+                    );
+                  })}
+                </div>
+              ) : (
+                <div style={{ opacity: 0.75 }}>No purchases yet.</div>
+              )}
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {/* TWO COLUMN LAYOUT */}
+      <div style={{ display: "grid", gridTemplateColumns: "60% 40%", gap: 32, marginTop: 32 }}>
+        {/* COLUMN ONE — COVER ONLY */}
+        <div>
+          <div style={pageCoverBox}>
+            {pageCoverUrl ? (
+              <img
+                src={pageCoverUrl}
+                alt="Cover"
+                style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }}
+              />
+            ) : (
+              <div style={pageCoverPlaceholder}>COVER</div>
+            )}
+          </div>
+        </div>
+
+        {/* COLUMN TWO */}
+        <div style={{ display: "flex", flexDirection: "column", gap: 22 }}>
+          <Section title={title} right={<span style={{ opacity: 0.8 }}>{owned ? "Owned" : "Not owned"}</span>}>
+            {artist ? <div style={{ opacity: 0.7 }}>{artist}</div> : null}
+            {description ? <div style={{ marginTop: 10, lineHeight: 1.6 }}>{description}</div> : null}
+            {shareId ? <div style={{ marginTop: 10, opacity: 0.55, fontSize: 12 }}>{shareId}</div> : null}
+          </Section>
+
+          <Section title="Menu">
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+              <button type="button" style={miniNavBtn} onClick={openCollection}>
+                My Collection
+              </button>
+              <button type="button" style={miniNavBtn}>
+                Playlist
+              </button>
+              <button type="button" style={miniNavBtn}>
+                Swag
+              </button>
+              <button type="button" style={miniNavBtn}>
+                Other
+              </button>
+            </div>
+            <div style={{ marginTop: 10, fontSize: 12, opacity: 0.7 }}>Playlist / Swag / Other are placeholders.</div>
+          </Section>
+
+          {/* Smart Bridge replaces Tracks list */}
+          {mode === "smartBridge" ? (
+            <SmartBridgeCard
+              tracks={tracks}
+              nowPlayingLabel={sbNowPlayingLabel}
+              activeSlot={sbActiveSlot}
+              highlightVisible={sbHighlightVisible}
+            />
+          ) : (
+            <Section title="Tracks" right={<span style={{ opacity: 0.75 }}>{tracks.length}</span>}>
+              {tracks?.length ? (
+                <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                  {tracks.map((t, i) => {
+                    const label = pickTrackTitle(t, i);
+                    const active = i === currentIndex;
+                    return (
+                      <button
+                        key={trackId(t, i)}
+                        type="button"
+                        onClick={() => selectTrack(i)}
+                        style={{
+                          textAlign: "left",
+                          padding: "10px 12px",
+                          borderRadius: 12,
+                          border: "1px solid rgba(255,255,255,0.12)",
+                          background: active ? "rgba(255,255,255,0.10)" : "transparent",
+                          color: "#fff",
+                          cursor: "pointer",
+                        }}
+                      >
+                        <span style={{ opacity: 0.7, marginRight: 8 }}>{i + 1}.</span>
+                        {label}
+                      </button>
+                    );
+                  })}
+                </div>
+              ) : (
+                <div style={{ opacity: 0.75 }}>No tracks.</div>
+              )}
+            </Section>
+          )}
+        </div>
+      </div>
+
+      {/* PLAYER — BOTTOM ONLY */}
+      <div style={{ marginTop: 40 }}>
+        <Section>
+          <AccountPlayerBar
+            audioRef={audioRef}
+            currentTrack={currentTrack}
+            isPlaying={isPlaying}
+            currentTime={currentTime}
+            duration={duration}
+            onPlay={() => {
+              setIsPlaying(true);
+              if (mode === "smartBridge" && currentTrack) bumpSmartBridgeNowPlaying(currentTrack, currentIndex);
+            }}
+            onPause={() => {
+              setIsPlaying(false);
+              stopBridgeAudio();
+            }}
+            onTimeUpdate={(t) => setCurrentTime(t)}
+            onDurationChange={(d) => setDuration(d)}
+            onSeek={onSeek}
+            onTrackEnd={() => {
+              // song <audio onEnded> drives behavior; keep this for UI safety
+              if (mode !== "smartBridge") setIsPlaying(false);
+            }}
+            onPrev={prevTrack}
+            onNext={nextTrack}
+            hasPrev={currentIndex > 0}
+            hasNext={currentIndex < tracks.length - 1}
+            playbackMode={mode}
+            onPlaybackModeChange={(nextMode) => {
+              setMode(nextMode);
+
+              if (nextMode !== "smartBridge") {
+                stopBridgeAudio();
+                setSbNowPlayingLabel("");
+                setSbActiveSlot(null);
+                setSbHighlightVisible(false);
+                clearSbHighlightTimer();
+              } else if (isPlaying && currentTrack) {
+                bumpSmartBridgeNowPlaying(currentTrack, currentIndex);
+              }
+            }}
+          />
+        </Section>
+      </div>
     </div>
   );
 }
+
+/* ---------------- small components ---------------- */
+
+function Section({ title, right, children }) {
+  return (
+    <div style={sectionStyle}>
+      {title || right ? (
+        <div style={sectionHeader}>
+          <div style={{ fontWeight: 900 }}>{title || ""}</div>
+          <div>{right || null}</div>
+        </div>
+      ) : null}
+      {children}
+    </div>
+  );
+}
+
+/* ---------------- styles ---------------- */
+
+const sectionStyle = {
+  padding: 18,
+  borderRadius: 20,
+  border: "1px solid rgba(255,255,255,0.12)",
+  background: "rgba(255,255,255,0.03)",
+};
+
+const sectionHeader = {
+  display: "flex",
+  justifyContent: "space-between",
+  marginBottom: 12,
+};
+
+const thumbItem = {
+  minWidth: 220,
+  textAlign: "left",
+  background: "transparent",
+  border: "none",
+  color: "#fff",
+  cursor: "pointer",
+};
+
+const thumbBox = {
+  width: 220,
+  aspectRatio: "1 / 1",
+  borderRadius: 22,
+  overflow: "hidden",
+  border: "1px solid rgba(255,255,255,0.14)",
+  background: "rgba(255,255,255,0.05)",
+  display: "flex",
+  alignItems: "center",
+  justifyContent: "center",
+};
+
+const coverPlaceholder = {
+  width: "100%",
+  height: "100%",
+  display: "flex",
+  alignItems: "center",
+  justifyContent: "center",
+  letterSpacing: 2,
+  opacity: 0.6,
+  fontSize: 14,
+};
+
+const thumbSmall = {
+  width: 56,
+  height: 56,
+  borderRadius: 14,
+  overflow: "hidden",
+  border: "1px solid rgba(255,255,255,0.14)",
+  background: "rgba(255,255,255,0.05)",
+  display: "grid",
+  placeItems: "center",
+  flexShrink: 0,
+};
+
+const coverPlaceholderSmall = {
+  width: "100%",
+  height: "100%",
+  display: "flex",
+  alignItems: "center",
+  justifyContent: "center",
+  letterSpacing: 2,
+  opacity: 0.6,
+  fontSize: 11,
+};
+
+const smallLinkBtn = {
+  padding: "8px 10px",
+  borderRadius: 12,
+  border: "1px solid rgba(255,255,255,0.14)",
+  background: "rgba(255,255,255,0.06)",
+  color: "#fff",
+  fontWeight: 800,
+  cursor: "pointer",
+};
+
+const popupOverlay = {
+  position: "fixed",
+  inset: 0,
+  background: "rgba(0,0,0,0.55)",
+  zIndex: 50,
+  display: "grid",
+  placeItems: "center",
+  padding: 18,
+};
+
+const popupCard = {
+  width: "min(860px, 96vw)",
+  borderRadius: 18,
+  border: "1px solid rgba(255,255,255,0.14)",
+  background: "rgba(20,20,20,0.92)",
+  backdropFilter: "blur(12px)",
+  overflow: "hidden",
+};
+
+const popupHeader = {
+  padding: 14,
+  display: "flex",
+  alignItems: "center",
+  justifyContent: "space-between",
+  borderBottom: "1px solid rgba(255,255,255,0.10)",
+};
+
+const closeBtn = {
+  width: 38,
+  height: 34,
+  borderRadius: 12,
+  border: "1px solid rgba(255,255,255,0.14)",
+  background: "rgba(255,255,255,0.06)",
+  color: "#fff",
+  cursor: "pointer",
+  fontWeight: 900,
+};
+
+const albumRow = {
+  width: "100%",
+  textAlign: "left",
+  padding: 14,
+  borderRadius: 16,
+  border: "1px solid rgba(255,255,255,0.10)",
+  background: "rgba(255,255,255,0.04)",
+  color: "#fff",
+  cursor: "pointer",
+};
+
+const pageCoverBox = {
+  width: "100%",
+  aspectRatio: "1 / 1",
+  borderRadius: 24,
+  border: "1px solid rgba(255,255,255,0.12)",
+  background: "rgba(255,255,255,0.05)",
+  display: "flex",
+  alignItems: "center",
+  justifyContent: "center",
+  overflow: "hidden",
+};
+
+const pageCoverPlaceholder = {
+  opacity: 0.6,
+  letterSpacing: 2,
+};
+
+const miniNavBtn = {
+  padding: "12px 12px",
+  borderRadius: 14,
+  border: "1px solid rgba(255,255,255,0.12)",
+  background: "rgba(255,255,255,0.04)",
+  color: "#fff",
+  fontWeight: 900,
+  cursor: "pointer",
+};

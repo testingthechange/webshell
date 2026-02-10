@@ -1,213 +1,257 @@
-import React, { useEffect, useRef, useState } from "react";
-
-function clamp(n, min, max) {
-  return Math.max(min, Math.min(max, n));
-}
-
-function formatTime(sec) {
-  if (!Number.isFinite(sec) || sec < 0) return "0:00";
-  const s = Math.floor(sec);
-  const m = Math.floor(s / 60);
-  const r = s % 60;
-  return `${m}:${String(r).padStart(2, "0")}`;
-}
+import React, { useEffect, useMemo, useRef, useState } from "react";
 
 /**
- * Product preview player (/product)
- * - Product-only audio element (data-audio="product")
- * - No Shuffle button
- * - No Repeat button
- * - Optional preview cap (default 40s)
+ * Fixes:
+ * 1) Continuous playback (auto-advance) after preview cap OR natural end.
+ * 2) “Click track then have to click Play twice” by supporting external index changes with auto-play,
+ *    and by forcing a reliable load()/play() sequence on src changes when we intend to autoplay.
+ *
+ * Usage options:
+ * - Uncontrolled: <ProductPlayer tracks={tracks} />
+ * - Controlled selection from parent: <ProductPlayer tracks={tracks} activeIndex={selectedIdx} />
+ *   (When activeIndex changes, it will autoplay by default.)
  */
 export default function ProductPlayer({
-  playbackUrl = "",
-  title = "Preview",
+  tracks = [],
+  initialIndex = 0,
+  activeIndex, // optional: parent-controlled selected track index
   previewSeconds = 40,
+  autoPlayOnIndexChange = true,
 }) {
   const audioRef = useRef(null);
+  const capTimerRef = useRef(null);
 
+  const tracksRef = useRef(tracks);
+  const idxRef = useRef(0);
+
+  // When true, the next src load should autoplay (prevents “click twice”)
+  const shouldAutoplayRef = useRef(false);
+
+  const clampIndex = (i, len) => {
+    if (!len) return 0;
+    const n = Number.isFinite(i) ? i : 0;
+    return Math.max(0, Math.min(n, len - 1));
+  };
+
+  const [idx, setIdx] = useState(() => clampIndex(initialIndex, tracks.length));
   const [isPlaying, setIsPlaying] = useState(false);
-  const [duration, setDuration] = useState(0);
-  const [currentTime, setCurrentTime] = useState(0);
-  const [error, setError] = useState("");
 
-  const src = playbackUrl || "";
-
-  // Load/replace source
   useEffect(() => {
-    const audio = audioRef.current;
-    if (!audio) return;
+    tracksRef.current = tracks;
+  }, [tracks]);
 
-    setError("");
-    setDuration(0);
-    setCurrentTime(0);
+  useEffect(() => {
+    idxRef.current = idx;
+  }, [idx]);
+
+  // Keep idx valid when tracks length changes
+  useEffect(() => {
+    setIdx((prev) => clampIndex(prev, tracks.length));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tracks.length]);
+
+  // Sync from activeIndex (preferred if parent controls selection)
+  useEffect(() => {
+    if (!Number.isFinite(activeIndex)) return;
+    const next = clampIndex(activeIndex, tracks.length);
+    setIdx(next);
+    if (autoPlayOnIndexChange) {
+      shouldAutoplayRef.current = true;
+      setIsPlaying(true);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeIndex]);
+
+  // Sync from initialIndex (if used)
+  useEffect(() => {
+    if (!Number.isFinite(initialIndex)) return;
+    const next = clampIndex(initialIndex, tracks.length);
+    setIdx(next);
+    // do NOT force autoplay from initialIndex by default
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [initialIndex]);
+
+  const current = tracks[idx] || null;
+
+  const src = useMemo(() => {
+    return current?.playbackUrl || current?.url || "";
+  }, [current]);
+
+  const clearCap = () => {
+    if (capTimerRef.current) {
+      window.clearTimeout(capTimerRef.current);
+      capTimerRef.current = null;
+    }
+  };
+
+  const scheduleCap = () => {
+    clearCap();
+    if (!previewSeconds || previewSeconds <= 0) return;
+
+    capTimerRef.current = window.setTimeout(() => {
+      const a = audioRef.current;
+      if (!a) return;
+
+      // preview completion behaves like "ended" -> advance
+      try {
+        a.pause();
+      } catch {}
+      try {
+        a.currentTime = 0;
+      } catch {}
+
+      advanceToNext();
+    }, previewSeconds * 1000);
+  };
+
+  const advanceToNext = () => {
+    const list = tracksRef.current || [];
+    if (!list.length) return;
+
+    const next = (idxRef.current + 1) % list.length;
+
+    shouldAutoplayRef.current = true;
+    setIsPlaying(true);
+    setIdx(next);
+  };
+
+  const advanceToPrev = () => {
+    const list = tracksRef.current || [];
+    if (!list.length) return;
+
+    const next = (idxRef.current - 1 + list.length) % list.length;
+
+    shouldAutoplayRef.current = true;
+    setIsPlaying(true);
+    setIdx(next);
+  };
+
+  // Attach audio event listeners ONCE
+  useEffect(() => {
+    const a = audioRef.current;
+    if (!a) return;
+
+    const onPlay = () => {
+      setIsPlaying(true);
+      scheduleCap();
+    };
+
+    const onPause = () => {
+      setIsPlaying(false);
+      clearCap();
+    };
+
+    const onEnded = () => {
+      clearCap();
+      advanceToNext();
+    };
+
+    a.addEventListener("play", onPlay);
+    a.addEventListener("pause", onPause);
+    a.addEventListener("ended", onEnded);
+
+    return () => {
+      clearCap();
+      a.removeEventListener("play", onPlay);
+      a.removeEventListener("pause", onPause);
+      a.removeEventListener("ended", onEnded);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Load / autoplay on src changes (reliable on Safari/Chrome)
+  useEffect(() => {
+    const a = audioRef.current;
+    if (!a) return;
+
+    clearCap();
 
     if (!src) {
-      audio.removeAttribute("src");
-      audio.load();
-      setIsPlaying(false);
+      try {
+        a.pause();
+      } catch {}
       return;
     }
 
-    audio.src = src;
-    audio.load();
-  }, [src]);
+    // Set source, force a reload (fixes “sometimes doesn’t start”)
+    a.src = src;
+    try {
+      a.currentTime = 0;
+    } catch {}
+    try {
+      a.load();
+    } catch {}
 
-  // Wire audio events
-  useEffect(() => {
-    const audio = audioRef.current;
-    if (!audio) return;
+    const tryAutoPlay = () => {
+      if (!shouldAutoplayRef.current) return;
 
-    const onLoadedMetadata = () =>
-      setDuration(Number.isFinite(audio.duration) ? audio.duration : 0);
+      // consume the flag once per src change
+      shouldAutoplayRef.current = false;
 
-    const onTimeUpdate = () => setCurrentTime(audio.currentTime || 0);
-    const onPlay = () => setIsPlaying(true);
-    const onPause = () => setIsPlaying(false);
-
-    const onEnded = () => {
-      // Product preview ends = stop (no repeat)
-      setIsPlaying(false);
+      // Attempt play; if blocked, user can tap play once
+      a.play().catch(() => {});
     };
 
-    const onError = () => {
-      const mediaErr = audio.error;
-      setError(mediaErr ? `Audio error (${mediaErr.code})` : "Audio error");
-      setIsPlaying(false);
-    };
+    // If we intend to autoplay, do it after metadata/canplay for reliability
+    const onLoaded = () => tryAutoPlay();
+    a.addEventListener("loadedmetadata", onLoaded);
+    a.addEventListener("canplay", onLoaded);
 
-    audio.addEventListener("loadedmetadata", onLoadedMetadata);
-    audio.addEventListener("timeupdate", onTimeUpdate);
-    audio.addEventListener("play", onPlay);
-    audio.addEventListener("pause", onPause);
-    audio.addEventListener("ended", onEnded);
-    audio.addEventListener("error", onError);
+    // Also attempt immediately (works in many cases)
+    if (isPlaying) {
+      shouldAutoplayRef.current = true;
+      tryAutoPlay();
+    } else {
+      tryAutoPlay();
+    }
 
     return () => {
-      audio.removeEventListener("loadedmetadata", onLoadedMetadata);
-      audio.removeEventListener("timeupdate", onTimeUpdate);
-      audio.removeEventListener("play", onPlay);
-      audio.removeEventListener("pause", onPause);
-      audio.removeEventListener("ended", onEnded);
-      audio.removeEventListener("error", onError);
+      a.removeEventListener("loadedmetadata", onLoaded);
+      a.removeEventListener("canplay", onLoaded);
     };
-  }, []);
+  }, [src, isPlaying]);
 
-  // Preview cap
+  // If previewSeconds changes while playing, re-arm cap
   useEffect(() => {
-    if (!previewSeconds || previewSeconds <= 0) return;
-    const audio = audioRef.current;
-    if (!audio) return;
+    if (!isPlaying) return;
+    scheduleCap();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [previewSeconds, isPlaying]);
 
-    const onTimeUpdate = () => {
-      if (audio.currentTime >= previewSeconds) {
-        audio.pause();
-        audio.currentTime = 0;
-      }
-    };
-
-    audio.addEventListener("timeupdate", onTimeUpdate);
-    return () => audio.removeEventListener("timeupdate", onTimeUpdate);
-  }, [previewSeconds]);
-
-  function togglePlay() {
-    const audio = audioRef.current;
-    if (!audio) return;
-
-    setError("");
+  const onToggle = () => {
+    const a = audioRef.current;
+    if (!a) return;
     if (!src) return;
 
-    if (audio.paused) {
-      audio
-        .play()
-        .then(() => setIsPlaying(true))
-        .catch((e) => {
-          setIsPlaying(false);
-          setError(String(e?.message || e));
-        });
+    if (a.paused) {
+      shouldAutoplayRef.current = true;
+      setIsPlaying(true);
+      a.play().catch(() => {});
     } else {
-      audio.pause();
-      setIsPlaying(false);
+      a.pause();
     }
-  }
+  };
 
-  function seekByClick(e) {
-    const audio = audioRef.current;
-    if (!audio) return;
-
-    const cappedDuration =
-      previewSeconds && previewSeconds > 0
-        ? Math.min(duration || 0, previewSeconds)
-        : duration || 0;
-
-    if (!cappedDuration) return;
-
-    const rect = e.currentTarget.getBoundingClientRect();
-    const x = clamp(e.clientX - rect.left, 0, rect.width);
-    const pct = rect.width ? x / rect.width : 0;
-
-    audio.currentTime = pct * cappedDuration;
-  }
-
-  const cappedDuration =
-    previewSeconds && previewSeconds > 0
-      ? Math.min(duration || 0, previewSeconds)
-      : duration || 0;
-
-  const cappedTime =
-    previewSeconds && previewSeconds > 0
-      ? clamp(currentTime || 0, 0, previewSeconds)
-      : currentTime || 0;
-
-  const pct = cappedDuration > 0 ? clamp(cappedTime / cappedDuration, 0, 1) : 0;
+  const onNext = () => advanceToNext();
+  const onPrev = () => advanceToPrev();
 
   return (
     <div>
-      <audio ref={audioRef} data-audio="product" preload="metadata" />
-
-      <div style={{ marginTop: 12, marginBottom: 10, fontWeight: 600 }}>
-        {title}
-      </div>
-
-      <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 12 }}>
-        <button
-          type="button"
-          onClick={togglePlay}
-          disabled={!src}
-          aria-label={isPlaying ? "Pause" : "Play"}
-        >
-          {isPlaying ? "❚❚" : "▶"}
+      <audio ref={audioRef} preload="metadata" />
+      <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
+        <button type="button" onClick={onPrev}>
+          Prev
         </button>
-
-        <div style={{ marginLeft: "auto", opacity: 0.75, fontVariantNumeric: "tabular-nums" }}>
-          {formatTime(cappedTime)} / {formatTime(cappedDuration)}
+        <button type="button" onClick={onToggle}>
+          {isPlaying ? "Pause" : "Play"}
+        </button>
+        <button type="button" onClick={onNext}>
+          Next
+        </button>
+        <div style={{ opacity: 0.7 }}>
+          {current?.title || `Track ${idx + 1}`} ({idx + 1}/{tracks.length})
         </div>
       </div>
-
-      <div
-        onClick={seekByClick}
-        role="button"
-        tabIndex={0}
-        style={{
-          height: 10,
-          borderRadius: 999,
-          background: "rgba(255,255,255,0.12)",
-          cursor: cappedDuration ? "pointer" : "default",
-          position: "relative",
-          overflow: "hidden",
-          marginBottom: 12,
-        }}
-      >
-        <div
-          style={{
-            width: `${pct * 100}%`,
-            height: "100%",
-            background: "rgba(255,255,255,0.7)",
-          }}
-        />
-      </div>
-
-      {error ? <div style={{ marginTop: 10, color: "#b00020" }}>Error: {error}</div> : null}
     </div>
   );
 }

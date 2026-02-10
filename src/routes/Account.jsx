@@ -7,6 +7,11 @@ import loadManifest from "../lib/loadManifest.js";
 // Smart Bridge (account-only)
 import SmartBridgeCard from "../components/account/SmartBridgeCard.jsx";
 import { useAccountPlaybackMode } from "../components/account/useAccountPlaybackMode.js";
+import * as SmartBridgePlaybackModule from "../components/account/useSmartBridgePlayback.js";
+
+// ✅ support either named or default export from the hook module
+const useSmartBridgePlayback =
+  SmartBridgePlaybackModule.useSmartBridgePlayback || SmartBridgePlaybackModule.default;
 
 const COLLECTION_KEY = "bb_collection_v1";
 
@@ -77,9 +82,6 @@ function ensureShareIdInCollection(shareId) {
   return saveCollectionIds(next);
 }
 
-// IMPORTANT: "Owned" should be true if either:
-// - mock_owned:<id> is set
-// - OR the id is in bb_collection_v1
 function isOwned(shareId, collectionIdsOverride) {
   const id = safeString(shareId);
   if (!id) return false;
@@ -113,6 +115,8 @@ function pickTitle(m) {
     safeString(m?.album?.title) ||
     safeString(m?.album?.name) ||
     safeString(m?.meta?.albumTitle) ||
+    safeString(m?.snapshot?.album?.meta?.albumTitle) ||
+    safeString(m?.snapshot?.album?.masterSave?.meta?.albumTitle) ||
     "Untitled"
   );
 }
@@ -122,6 +126,8 @@ function pickArtist(m) {
     safeString(m?.artist) ||
     safeString(m?.album?.artist) ||
     safeString(m?.meta?.artist) ||
+    safeString(m?.snapshot?.album?.meta?.artistName) ||
+    safeString(m?.snapshot?.album?.masterSave?.meta?.artistName) ||
     "Unknown artist"
   );
 }
@@ -131,6 +137,8 @@ function pickDescription(m) {
     safeString(m?.description) ||
     safeString(m?.album?.description) ||
     safeString(m?.meta?.description) ||
+    safeString(m?.snapshot?.album?.meta?.description) ||
+    safeString(m?.snapshot?.album?.masterSave?.meta?.description) ||
     ""
   );
 }
@@ -142,19 +150,47 @@ function pickCoverKey(m) {
     safeString(m?.coverKey) ||
     safeString(m?.artworkKey) ||
     safeString(m?.album?.artworkKey) ||
+    safeString(m?.snapshot?.album?.cover?.s3Key) ||
+    safeString(m?.snapshot?.album?.masterSave?.cover?.s3Key) ||
     ""
   );
 }
 
 function pickTracks(m) {
+  // Published wrapper shape: { snapshot: { catalog: { songs: [...] } } }
   if (Array.isArray(m?.tracks)) return m.tracks;
   if (Array.isArray(m?.album?.tracks)) return m.album.tracks;
+  if (Array.isArray(m?.snapshot?.catalog?.songs)) return m.snapshot.catalog.songs;
   if (Array.isArray(m?.catalog?.songs)) return m.catalog.songs;
   if (Array.isArray(m?.project?.catalog?.songs)) return m.project.catalog.songs;
   return [];
 }
 
-function pickTrackAudioKey(t) {
+function pickConnectionsAny(m) {
+  // Handles:
+  // - published wrapper { snapshot: { songs: { connections } } }
+  // - manifest-ish { songs: { connections } }
+  // - other variants
+  const candidates = [
+    m?.snapshot?.songs?.connections,
+    m?.snapshot?.smartBridge?.connections,
+    m?.snapshot?.songs?.songConnections,
+    m?.songs?.connections,
+    m?.smartBridge?.connections,
+    m?.manifest?.snapshot?.songs?.connections,
+    m?.manifest?.songs?.connections,
+  ];
+
+  for (const c of candidates) {
+    if (c && typeof c === "object" && !Array.isArray(c)) return c;
+  }
+  return {};
+}
+
+function pickTrackAudioKeyAlbum(t) {
+  const filesAlbum = safeString(t?.files?.album?.s3Key);
+  if (filesAlbum) return filesAlbum;
+
   return (
     safeString(t?.s3Key) ||
     safeString(t?.audioS3Key) ||
@@ -166,8 +202,25 @@ function pickTrackAudioKey(t) {
   );
 }
 
+function pickTrackAudioKeySmart(t, choice) {
+  const ch = choice === "b" ? "b" : "a";
+  const key = safeString(t?.files?.[ch]?.s3Key);
+  if (key) return key;
+  return pickTrackAudioKeyAlbum(t);
+}
+
 function trackId(t, i) {
   return safeString(t?.id) || safeString(t?.s3Key) || safeString(t?.audioS3Key) || `track:${i}`;
+}
+
+function pickTrackTitle(t, i) {
+  return safeString(t?.title) || safeString(t?.name) || `Track ${i + 1}`;
+}
+
+function pickTrackSlot(t, i) {
+  const v = Number(t?.slot);
+  if (Number.isFinite(v) && v > 0) return v;
+  return i + 1;
 }
 
 /* ---------------- component ---------------- */
@@ -187,36 +240,65 @@ export default function Account() {
 
   const purchasedFlag = safeString(sp.get("purchased")) === "1";
 
-  const audioRef = useRef(null);
+  // ONE audio element for songs + bridges (autoplay-safe)
+  const songAudioRef = useRef(null);
 
-  // Existing file uses collection objects (shareId/title/artist/coverUrl etc.)
-  // Keep that model. We’ll refresh it from localStorage on open.
   const [collection, setCollection] = useState([]);
   const [collectionOpen, setCollectionOpen] = useState(false);
-
-  // cover url cache per shareId
-  const [signedCovers, setSignedCovers] = useState({}); // { [shareId]: signedUrl }
+  const [signedCovers, setSignedCovers] = useState({});
 
   const [shareId, setShareId] = useState("");
   const [manifest, setManifest] = useState(null);
   const [pageCoverUrl, setPageCoverUrl] = useState("");
   const [tracks, setTracks] = useState([]);
 
+  // Connections derived from manifest (handles published wrapper shape)
+  const connections = useMemo(() => pickConnectionsAny(manifest), [manifest]);
+
   const [currentIndex, setCurrentIndex] = useState(0);
   const [currentTrack, setCurrentTrack] = useState(null);
+
+  // Choice used for CURRENT song in smartBridge mode (A/B)
+  const [currentChoice, setCurrentChoice] = useState("a");
+
   const [isPlaying, setIsPlaying] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(0);
 
   const [error, setError] = useState("");
 
-  // derived ids list from localStorage (needed for owned + purchase landing)
   const [collectionIds, setCollectionIds] = useState(() => loadCollectionIds());
-
   const owned = useMemo(() => isOwned(shareId, collectionIds), [shareId, collectionIds.join("|")]);
 
-  // Account-only playback mode (Album vs Smart Bridge), persisted per shareId
   const { mode, setMode } = useAccountPlaybackMode({ shareId });
+
+  /* ---------- Smart Bridge: Now Playing + highlight state ---------- */
+
+  const [sbNowPlayingLabel, setSbNowPlayingLabel] = useState("");
+  const [sbActiveSlot, setSbActiveSlot] = useState(null);
+  const [sbHighlightVisible, setSbHighlightVisible] = useState(false);
+  const sbHighlightTimerRef = useRef(null);
+
+  function clearSbHighlightTimer() {
+    if (sbHighlightTimerRef.current) {
+      clearTimeout(sbHighlightTimerRef.current);
+      sbHighlightTimerRef.current = null;
+    }
+  }
+
+  function bumpSmartBridgeNowPlaying(t, i) {
+    const slot = pickTrackSlot(t, i);
+    const title = pickTrackTitle(t, i);
+    setSbActiveSlot(slot);
+    setSbNowPlayingLabel(`${slot}. ${title}`);
+
+    setSbHighlightVisible(true);
+    clearSbHighlightTimer();
+    sbHighlightTimerRef.current = setTimeout(() => {
+      setSbHighlightVisible(false);
+      sbHighlightTimerRef.current = null;
+    }, 100_000);
+  }
 
   /* ---------- localStorage sync ---------- */
 
@@ -239,7 +321,6 @@ export default function Account() {
     const existing = loadCollectionIds();
 
     let shouldAdd = false;
-
     if (purchasedFlag) shouldAdd = true;
 
     if (!shouldAdd) {
@@ -266,6 +347,92 @@ export default function Account() {
     setCollectionIds(loadCollectionIds());
   }, [routeShareId, purchasedFlag]);
 
+  /* ---------- navigation helpers ---------- */
+
+  function selectTrack(i, opts) {
+    const t = tracks?.[i];
+    if (!t) return;
+
+    const nextChoice = safeString(opts?.choice) === "b" ? "b" : "a";
+    const autoplay = opts?.autoplay !== false;
+
+    setCurrentIndex(i);
+    setCurrentTrack(t);
+
+    if (mode === "smartBridge") {
+      setCurrentChoice(nextChoice);
+      bumpSmartBridgeNowPlaying(t, i);
+    } else {
+      setCurrentChoice("a");
+      setSbNowPlayingLabel("");
+      setSbActiveSlot(null);
+      setSbHighlightVisible(false);
+      clearSbHighlightTimer();
+    }
+
+    if (autoplay) {
+      setIsPlaying(true);
+      try {
+        songAudioRef.current?.play?.();
+      } catch {}
+    }
+  }
+
+  function prevTrack() {
+    if (currentIndex > 0) selectTrack(currentIndex - 1, { autoplay: true });
+  }
+
+  function nextTrack() {
+    if (currentIndex < tracks.length - 1) selectTrack(currentIndex + 1, { autoplay: true });
+  }
+
+  function onSeek(t) {
+    const a = songAudioRef.current;
+    if (!a) return;
+    a.currentTime = t;
+    setCurrentTime(t);
+  }
+
+  /* ---------- Smart Bridge Playback (ONE audio element; swaps src to bridge) ---------- */
+
+  const { handleEnded, phase, endedAll } = useSmartBridgePlayback({
+    audioRef: songAudioRef,
+    tracks,
+    connections,
+    signUrl,
+    mode,
+    isPlaying,
+    currentIndex,
+    currentTrack,
+    setIsPlaying,
+    selectTrack,
+  });
+
+  /* ---------- keep Smart Bridge "Now Playing" in sync ---------- */
+
+  useEffect(() => {
+    if (mode !== "smartBridge") return;
+
+    if (endedAll) {
+      setSbNowPlayingLabel("—");
+      setSbActiveSlot(null);
+      setSbHighlightVisible(false);
+      clearSbHighlightTimer();
+      return;
+    }
+
+    if (phase === "bridge") {
+      setSbNowPlayingLabel("→ bridge");
+      setSbActiveSlot(null);
+      setSbHighlightVisible(false);
+      clearSbHighlightTimer();
+      return;
+    }
+
+    if (currentTrack) bumpSmartBridgeNowPlaying(currentTrack, currentIndex);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mode, phase, endedAll, currentIndex, currentTrack]);
+
   /* ---------- load active page album ---------- */
 
   useEffect(() => {
@@ -273,6 +440,7 @@ export default function Account() {
 
     (async () => {
       const id = safeString(routeShareId);
+
       setShareId(id);
       setError("");
       setManifest(null);
@@ -280,20 +448,25 @@ export default function Account() {
       setTracks([]);
       setCurrentIndex(0);
       setCurrentTrack(null);
+      setCurrentChoice("a");
       setIsPlaying(false);
       setCurrentTime(0);
       setDuration(0);
 
-      const a = audioRef.current;
-      if (a) {
-        try {
-          a.pause?.();
-        } catch {}
-        a.removeAttribute("src");
-        try {
-          a.load?.();
-        } catch {}
-      }
+      setSbNowPlayingLabel("");
+      setSbActiveSlot(null);
+      setSbHighlightVisible(false);
+      clearSbHighlightTimer();
+
+      // hard reset audio
+      try {
+        const s = songAudioRef.current;
+        if (s) {
+          s.pause?.();
+          s.removeAttribute("src");
+          s.load?.();
+        }
+      } catch {}
 
       if (!id) return;
 
@@ -303,12 +476,35 @@ export default function Account() {
 
         setManifest(m);
 
-        const list = pickTracks(m);
-        setTracks(list);
+        // Debug: confirm connections exist
+        try {
+          const c = pickConnectionsAny(m);
+          console.log("[SB] Account connections loaded", {
+            count: Object.keys(c || {}).length,
+            sample: Object.keys(c || {}).slice(0, 12),
+            shapeKeys: Object.keys(m || {}).slice(0, 20),
+            snapshotKeys: Object.keys(m?.snapshot || {}).slice(0, 20),
+          });
+        } catch {}
 
-        if (list.length) {
+        const raw = pickTracks(m);
+
+        // keep songs with album OR A/B
+        const playable = (raw || [])
+          .filter((t) => {
+            const hasAlbum = !!pickTrackAudioKeyAlbum(t);
+            const hasA = !!safeString(t?.files?.a?.s3Key);
+            const hasB = !!safeString(t?.files?.b?.s3Key);
+            return hasAlbum || hasA || hasB;
+          })
+          .sort((a, b) => (Number(a?.slot) || 0) - (Number(b?.slot) || 0));
+
+        setTracks(playable);
+
+        if (playable.length) {
           setCurrentIndex(0);
-          setCurrentTrack(list[0]);
+          setCurrentTrack(playable[0]);
+          setCurrentChoice("a");
         }
 
         const coverKey = pickCoverKey(m);
@@ -321,20 +517,25 @@ export default function Account() {
 
     return () => {
       cancelled = true;
+      clearSbHighlightTimer();
     };
   }, [routeShareId]);
 
-  /* ---------- bind audio src ---------- */
+  /* ---------- bind SONG audio src (do NOT stomp while bridge phase is playing) ---------- */
 
   useEffect(() => {
     let cancelled = false;
 
     (async () => {
-      const a = audioRef.current;
+      if (mode === "smartBridge" && phase === "bridge") return;
+
+      const a = songAudioRef.current;
       const t = currentTrack;
       if (!a || !t) return;
 
-      const key = pickTrackAudioKey(t);
+      const key =
+        mode === "smartBridge" ? pickTrackAudioKeySmart(t, currentChoice) : pickTrackAudioKeyAlbum(t);
+
       if (!key) return;
 
       try {
@@ -343,9 +544,7 @@ export default function Account() {
 
         if (a.src !== url) {
           a.src = url;
-          try {
-            a.load?.();
-          } catch {}
+          a.load?.();
         }
 
         if (isPlaying) {
@@ -357,43 +556,11 @@ export default function Account() {
     return () => {
       cancelled = true;
     };
-  }, [currentTrack, isPlaying]);
-
-  /* ---------- navigation helpers ---------- */
-
-  function selectTrack(i) {
-    const t = tracks?.[i];
-    if (!t) return;
-    setCurrentIndex(i);
-    setCurrentTrack(t);
-    setIsPlaying(true);
-    try {
-      audioRef.current?.play?.();
-    } catch {}
-  }
-
-  function prevTrack() {
-    if (currentIndex > 0) selectTrack(currentIndex - 1);
-  }
-
-  function nextTrack() {
-    if (currentIndex < tracks.length - 1) selectTrack(currentIndex + 1);
-  }
-
-  function onSeek(t) {
-    const a = audioRef.current;
-    if (!a) return;
-    a.currentTime = t;
-    setCurrentTime(t);
-  }
+  }, [currentTrack, isPlaying, mode, currentChoice, phase]);
 
   /* ---------- collection model + cover signing ---------- */
 
   function readCollection() {
-    // Your existing app stores either:
-    // - bb_collection_v1 (array of shareIds)
-    // - mock_library (array of {shareId,title,artist,coverUrl,...})
-    // Prefer mock_library for title/artist if present, fallback to ids list.
     const ids = loadCollectionIds();
 
     let lib = [];
@@ -433,14 +600,11 @@ export default function Account() {
     return safeString(signedCovers?.[id] || "");
   }
 
-  // IMPORTANT: whenever collection list changes (or popup opens), sign covers for missing ones
   useEffect(() => {
     let cancelled = false;
 
     (async () => {
-      const ids = (collection || [])
-        .map((a) => safeString(a?.shareId))
-        .filter(Boolean);
+      const ids = (collection || []).map((a) => safeString(a?.shareId)).filter(Boolean);
 
       for (const id of ids) {
         if (cancelled) return;
@@ -457,9 +621,7 @@ export default function Account() {
           if (cancelled || !url) continue;
 
           setSignedCovers((prev) => ({ ...prev, [id]: url }));
-        } catch {
-          // ignore
-        }
+        } catch {}
       }
     })();
 
@@ -467,7 +629,7 @@ export default function Account() {
       cancelled = true;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [collectionOpen, collection.map((x) => safeString(x?.shareId)).join("|")]);
+  }, [collectionOpen, (collection || []).map((x) => safeString(x?.shareId)).join("|")]);
 
   const title = pickTitle(manifest) || "Account";
   const artist = pickArtist(manifest) || "";
@@ -476,11 +638,12 @@ export default function Account() {
   return (
     <div style={{ width: "70%", maxWidth: 1320, margin: "0 auto", padding: "28px 0" }}>
       <audio
-        ref={audioRef}
-        preload="metadata"
+        ref={songAudioRef}
+        preload="auto"
         style={{ display: "none" }}
         onTimeUpdate={(e) => setCurrentTime(e.currentTarget.currentTime)}
         onLoadedMetadata={(e) => setDuration(e.currentTarget.duration || 0)}
+        onEnded={handleEnded}
       />
 
       {error ? (
@@ -522,12 +685,8 @@ export default function Account() {
                     )}
                   </div>
 
-                  <div style={{ fontWeight: 800, fontSize: 12, marginTop: 6 }}>
-                    {a?.title || "Album"}
-                  </div>
-                  {a?.artist ? (
-                    <div style={{ opacity: 0.7, fontSize: 11, marginTop: 2 }}>{a.artist}</div>
-                  ) : null}
+                  <div style={{ fontWeight: 800, fontSize: 12, marginTop: 6 }}>{a?.title || "Album"}</div>
+                  {a?.artist ? <div style={{ opacity: 0.7, fontSize: 11, marginTop: 2 }}>{a.artist}</div> : null}
                 </button>
               );
             })}
@@ -541,12 +700,7 @@ export default function Account() {
           <div style={popupCard} onMouseDown={(e) => e.stopPropagation()}>
             <div style={popupHeader}>
               <div style={{ fontWeight: 900 }}>My Collection</div>
-              <button
-                type="button"
-                onClick={() => setCollectionOpen(false)}
-                style={closeBtn}
-                aria-label="Close"
-              >
+              <button type="button" onClick={() => setCollectionOpen(false)} style={closeBtn} aria-label="Close">
                 ✕
               </button>
             </div>
@@ -638,32 +792,28 @@ export default function Account() {
                 Other
               </button>
             </div>
-            <div style={{ marginTop: 10, fontSize: 12, opacity: 0.7 }}>
-              Playlist / Swag / Other are placeholders.
-            </div>
+            <div style={{ marginTop: 10, fontSize: 12, opacity: 0.7 }}>Playlist / Swag / Other are placeholders.</div>
           </Section>
 
-          {/* OPTION 1: Replace Tracks list entirely when Smart Bridge mode is active */}
           {mode === "smartBridge" ? (
             <SmartBridgeCard
-              shareId={shareId}
               tracks={tracks}
-              onRequestPlay={() => {
-                // skeleton-only: no audio changes yet
-              }}
+              nowPlayingLabel={sbNowPlayingLabel}
+              activeSlot={sbActiveSlot}
+              highlightVisible={sbHighlightVisible}
             />
           ) : (
             <Section title="Tracks" right={<span style={{ opacity: 0.75 }}>{tracks.length}</span>}>
               {tracks?.length ? (
                 <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
                   {tracks.map((t, i) => {
-                    const label = t?.title || t?.name || `Track ${i + 1}`;
+                    const label = pickTrackTitle(t, i);
                     const active = i === currentIndex;
                     return (
                       <button
                         key={trackId(t, i)}
                         type="button"
-                        onClick={() => selectTrack(i)}
+                        onClick={() => selectTrack(i, { autoplay: true })}
                         style={{
                           textAlign: "left",
                           padding: "10px 12px",
@@ -692,23 +842,39 @@ export default function Account() {
       <div style={{ marginTop: 40 }}>
         <Section>
           <AccountPlayerBar
-            audioRef={audioRef}
+            audioRef={songAudioRef}
             currentTrack={currentTrack}
             isPlaying={isPlaying}
             currentTime={currentTime}
             duration={duration}
-            onPlay={() => setIsPlaying(true)}
+            onPlay={() => {
+              setIsPlaying(true);
+              if (mode === "smartBridge" && currentTrack) bumpSmartBridgeNowPlaying(currentTrack, currentIndex);
+            }}
             onPause={() => setIsPlaying(false)}
             onTimeUpdate={(t) => setCurrentTime(t)}
             onDurationChange={(d) => setDuration(d)}
             onSeek={onSeek}
-            onTrackEnd={() => setIsPlaying(false)}
+            onTrackEnd={() => {
+              if (mode !== "smartBridge") setIsPlaying(false);
+            }}
             onPrev={prevTrack}
             onNext={nextTrack}
             hasPrev={currentIndex > 0}
             hasNext={currentIndex < tracks.length - 1}
             playbackMode={mode}
-            onPlaybackModeChange={setMode}
+            onPlaybackModeChange={(nextMode) => {
+              setMode(nextMode);
+
+              if (nextMode !== "smartBridge") {
+                setSbNowPlayingLabel("");
+                setSbActiveSlot(null);
+                setSbHighlightVisible(false);
+                clearSbHighlightTimer();
+              } else if (isPlaying && currentTrack) {
+                bumpSmartBridgeNowPlaying(currentTrack, currentIndex);
+              }
+            }}
           />
         </Section>
       </div>
@@ -721,7 +887,7 @@ export default function Account() {
 function Section({ title, right, children }) {
   return (
     <div style={sectionStyle}>
-      {(title || right) ? (
+      {title || right ? (
         <div style={sectionHeader}>
           <div style={{ fontWeight: 900 }}>{title || ""}</div>
           <div>{right || null}</div>

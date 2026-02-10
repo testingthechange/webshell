@@ -82,6 +82,8 @@ export default function Product() {
         setCurrentTrack(null);
         setIsPlaying(false);
         setCoverUrl("");
+        setCurrentTime(0);
+        setDuration(0);
 
         if (!shareId) return;
 
@@ -113,20 +115,42 @@ export default function Product() {
     };
   }, [shareId]);
 
-  function selectTrack(index) {
+  function tryPlaySoon() {
+    const a = audioRef.current;
+    if (!a) return;
+    window.setTimeout(() => {
+      const el = audioRef.current;
+      if (!el) return;
+      el.play?.().catch(() => {});
+    }, 0);
+  }
+
+  useEffect(() => {
+    if (!currentTrack) return;
+    if (!isPlaying) return;
+    tryPlaySoon();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentTrack, isPlaying]);
+
+  function selectTrack(index, { autoplay = true } = {}) {
     const t = tracks[index];
     if (!t) return;
     setCurrentIndex(index);
     setCurrentTrack(t);
-    setIsPlaying(true);
+    if (autoplay) setIsPlaying(true);
+    if (autoplay) tryPlaySoon();
   }
 
   function prevTrack() {
-    if (currentIndex > 0) selectTrack(currentIndex - 1);
+    if (!tracks.length) return;
+    const next = currentIndex > 0 ? currentIndex - 1 : tracks.length - 1;
+    selectTrack(next, { autoplay: true });
   }
 
   function nextTrack() {
-    if (currentIndex < tracks.length - 1) selectTrack(currentIndex + 1);
+    if (!tracks.length) return;
+    const next = currentIndex < tracks.length - 1 ? currentIndex + 1 : 0;
+    selectTrack(next, { autoplay: true });
   }
 
   function onSeek(t) {
@@ -141,82 +165,92 @@ export default function Product() {
     nav(`/checkout/${shareId}`);
   }
 
+  function onTrackEnd() {
+    if (!tracks.length) {
+      setIsPlaying(false);
+      return;
+    }
+    setIsPlaying(true);
+    nextTrack();
+  }
+
   const title = manifest?.title || manifest?.album?.title || "Product";
   const artist = manifest?.artist || manifest?.album?.artist || "";
   const description = manifest?.description || manifest?.album?.description || "";
   const price = manifest?.price || manifest?.product?.price || "";
 
   return (
-    <div style={{ width: "70%", maxWidth: 1320, margin: "0 auto", padding: "28px 0" }}>
-      {error && (
-        <Section title="Error">
-          <div style={{ opacity: 0.85, whiteSpace: "pre-wrap" }}>{error}</div>
-        </Section>
-      )}
-
-      <div style={{ display: "grid", gridTemplateColumns: "60% 40%", gap: 32 }}>
-        {/* COLUMN ONE — COVER ONLY */}
-        <div>
-          <div style={coverBox}>
-            {coverUrl ? (
-              <img
-                src={coverUrl}
-                alt="Cover"
-                style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }}
-              />
-            ) : (
-              <div style={coverPlaceholder}>COVER</div>
-            )}
-          </div>
-        </div>
-
-        {/* COLUMN TWO — META → BUY → MARKETING → TRACKS */}
-        <div style={{ display: "flex", flexDirection: "column", gap: 22 }}>
-          <Section title={title}>
-            {artist && <div style={{ opacity: 0.7 }}>{artist}</div>}
-            {description && <div style={{ marginTop: 10, lineHeight: 1.6 }}>{description}</div>}
+    <div style={{ width: "100%", padding: "28px 0" }}>
+      {/* MAIN CONTENT stays constrained */}
+      <div style={{ width: "70%", maxWidth: 1320, margin: "0 auto" }}>
+        {error && (
+          <Section title="Error">
+            <div style={{ opacity: 0.85, whiteSpace: "pre-wrap" }}>{error}</div>
           </Section>
+        )}
 
-          <Section title="Buy" right={price ? <span>{price}</span> : null}>
-            <button type="button" onClick={goToCheckout} style={buyBtn}>
-              Buy (beta)
-            </button>
-          </Section>
-
-          <Section title="Why You’ll Love This">
-            <div style={{ lineHeight: 1.6 }}>
-              Exclusive release. High-quality masters. Seamless playback experience.
-              Support the artist directly and unlock the full album.
+        <div style={{ display: "grid", gridTemplateColumns: "60% 40%", gap: 32 }}>
+          <div>
+            <div style={coverBox}>
+              {coverUrl ? (
+                <img
+                  src={coverUrl}
+                  alt="Cover"
+                  style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }}
+                />
+              ) : (
+                <div style={coverPlaceholder}>COVER</div>
+              )}
             </div>
-          </Section>
+          </div>
 
-          <Section title="Tracks">
-            {tracks.map((t, i) => (
-              <button
-                key={t?.id || t?.s3Key || i}
-                onClick={() => selectTrack(i)}
-                style={{
-                  width: "100%",
-                  textAlign: "left",
-                  padding: "12px 14px",
-                  marginBottom: 8,
-                  borderRadius: 14,
-                  border: "1px solid rgba(255,255,255,0.14)",
-                  background: i === currentIndex ? "rgba(255,255,255,0.14)" : "rgba(255,255,255,0.04)",
-                  color: "#fff",
-                  cursor: "pointer",
-                }}
-              >
-                {i + 1}. {t?.title || t?.name}
+          <div style={{ display: "flex", flexDirection: "column", gap: 22 }}>
+            <Section title={title}>
+              {artist && <div style={{ opacity: 0.7 }}>{artist}</div>}
+              {description && <div style={{ marginTop: 10, lineHeight: 1.6 }}>{description}</div>}
+            </Section>
+
+            <Section title="Buy" right={price ? <span>{price}</span> : null}>
+              <button type="button" onClick={goToCheckout} style={buyBtn}>
+                Buy (beta)
               </button>
-            ))}
-          </Section>
+            </Section>
+
+            <Section title="Why You’ll Love This">
+              <div style={{ lineHeight: 1.6 }}>
+                Exclusive release. High-quality masters. Seamless playback experience. Support the artist directly and
+                unlock the full album.
+              </div>
+            </Section>
+
+            <Section title="Tracks">
+              {tracks.map((t, i) => (
+                <button
+                  key={t?.id || t?.s3Key || i}
+                  onClick={() => selectTrack(i, { autoplay: true })}
+                  style={{
+                    width: "100%",
+                    textAlign: "left",
+                    padding: "12px 14px",
+                    marginBottom: 8,
+                    borderRadius: 14,
+                    border: "1px solid rgba(255,255,255,0.14)",
+                    background: i === currentIndex ? "rgba(255,255,255,0.14)" : "rgba(255,255,255,0.04)",
+                    color: "#fff",
+                    cursor: "pointer",
+                  }}
+                >
+                  {i + 1}. {t?.title || t?.name}
+                </button>
+              ))}
+            </Section>
+          </div>
         </div>
       </div>
 
-      {/* PLAYER — BOTTOM, SINGLE LOCATION */}
-      <div style={{ marginTop: 40 }}>
-        <Section>
+      {/* PLAYER is full-width of the viewport */}
+      <div style={{ marginTop: 40, width: "100%" }}>
+        <div style={{ width: "100%", padding: "0 24px" }}>
           <ProductPlayerBar
             audioRef={audioRef}
             currentTrack={currentTrack}
@@ -224,18 +258,21 @@ export default function Product() {
             currentTime={currentTime}
             duration={duration}
             playbackMode="preview"
-            onPlay={() => setIsPlaying(true)}
+            onPlay={() => {
+              setIsPlaying(true);
+              tryPlaySoon();
+            }}
             onPause={() => setIsPlaying(false)}
             onTimeUpdate={setCurrentTime}
             onDurationChange={setDuration}
             onSeek={onSeek}
-            onTrackEnd={() => setIsPlaying(false)}
+            onTrackEnd={onTrackEnd}
             onPrev={prevTrack}
             onNext={nextTrack}
-            hasPrev={currentIndex > 0}
-            hasNext={currentIndex < tracks.length - 1}
+            hasPrev={tracks.length > 1}
+            hasNext={tracks.length > 1}
           />
-        </Section>
+        </div>
       </div>
     </div>
   );

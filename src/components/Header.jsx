@@ -3,13 +3,9 @@ import { Link, NavLink, useNavigate } from "react-router-dom";
 
 /**
  * Global site header (shared across pages)
- * Requirements:
- * - Brand text: "Block Radius"
- * - Nav: Home, Shop, Account
- * - Search bar (persistent)
- * - Login button (top-right)
- * - NO avatar/user indicator
- * - NO expand/diagonal icon
+ * - Brand + Nav brought up into a single tight band
+ * - Reduced vertical padding
+ * - Right-side actions inline (Login + Search)
  */
 export default function Header() {
   const navigate = useNavigate();
@@ -18,7 +14,6 @@ export default function Header() {
     e.preventDefault();
     const form = e.currentTarget;
     const q = String(form.elements.q?.value || "").trim();
-    // no backend: route to shop with query for now
     if (q) navigate(`/shop?q=${encodeURIComponent(q)}`);
     else navigate("/shop");
   }
@@ -26,29 +21,20 @@ export default function Header() {
   return (
     <header style={styles.wrap}>
       <div style={styles.inner}>
-        <div style={styles.left}>
-          <Link to="/" style={styles.brand} aria-label="Home">
-            Block Radius
-          </Link>
+        {/* LEFT — BRAND */}
+        <Link to="/" style={styles.brand} aria-label="Home">
+          Block Radius
+        </Link>
 
-          <nav style={styles.nav} aria-label="Primary">
-            <NavItem to="/">Home</NavItem>
-            <NavItem to="/shop">Shop</NavItem>
-            <NavItem to="/account">Account</NavItem>
-          </nav>
-        </div>
+        {/* CENTER — NAV */}
+        <nav style={styles.centerNav} aria-label="Primary">
+          <NavItem to="/">Home</NavItem>
+          <NavItem to="/account">Account</NavItem>
+          <NavItem to="/shop">Shop</NavItem>
+        </nav>
 
+        {/* RIGHT — ACTIONS */}
         <div style={styles.right}>
-          <form onSubmit={onSubmitSearch} style={styles.searchForm} role="search" aria-label="Site search">
-            <input
-              name="q"
-              type="search"
-              placeholder="Search"
-              autoComplete="off"
-              style={styles.searchInput}
-            />
-          </form>
-
           <button
             type="button"
             onClick={() => navigate("/login")}
@@ -57,6 +43,21 @@ export default function Header() {
           >
             Login
           </button>
+
+          <form
+            onSubmit={onSubmitSearch}
+            style={styles.searchForm}
+            role="search"
+            aria-label="Site search"
+          >
+            <input
+              name="q"
+              type="search"
+              placeholder="Search"
+              autoComplete="off"
+              style={styles.searchInput}
+            />
+          </form>
         </div>
       </div>
     </header>
@@ -70,8 +71,10 @@ function NavItem({ to, children }) {
       end={to === "/"}
       style={({ isActive }) => ({
         ...styles.navLink,
-        opacity: isActive ? 1 : 0.75,
-        borderBottomColor: isActive ? "rgba(255,255,255,0.45)" : "transparent",
+        opacity: isActive ? 1 : 0.7,
+        borderBottomColor: isActive
+          ? "rgba(255,255,255,0.45)"
+          : "transparent",
       })}
     >
       {children}
@@ -88,61 +91,67 @@ const styles = {
     backdropFilter: "blur(10px)",
     borderBottom: "1px solid rgba(255,255,255,0.10)",
   },
+
   inner: {
-    maxWidth: 980,
+    maxWidth: 1200,
     margin: "0 auto",
-    padding: "14px 16px",
+    padding: "10px 16px", // 🔽 reduced vertical padding
     display: "flex",
     alignItems: "center",
-    justifyContent: "space-between",
-    gap: 16,
+    gap: 24,
   },
-  left: {
-    display: "flex",
-    alignItems: "center",
-    gap: 18,
-    minWidth: 0,
-  },
+
   brand: {
     color: "inherit",
     textDecoration: "none",
     fontWeight: 700,
     letterSpacing: 0.2,
     whiteSpace: "nowrap",
+    flex: "0 0 auto",
   },
-  nav: {
+
+  centerNav: {
     display: "flex",
     alignItems: "center",
-    gap: 14,
+    gap: 18,
+    justifyContent: "center",
+    flex: "1 1 auto",
   },
+
   navLink: {
     color: "inherit",
     textDecoration: "none",
     fontSize: 14,
-    padding: "6px 2px",
+    padding: "4px 2px",
     borderBottom: "1px solid",
     transition: "opacity 120ms ease",
     whiteSpace: "nowrap",
   },
+
   right: {
-    display: "flex",
+    display: "flex",          // 🔄 was column
     alignItems: "center",
-    gap: 10,
-    minWidth: 0,
+    gap: 12,
+    flex: "0 0 auto",
   },
-  searchForm: { minWidth: 240, maxWidth: 360, width: "32vw" },
+
+  searchForm: {
+    width: 220,               // 🔽 reduced visual weight
+  },
+
   searchInput: {
     width: "100%",
-    padding: "8px 10px",
-    borderRadius: 12,
-    border: "1px solid rgba(255,255,255,0.12)",
-    background: "rgba(255,255,255,0.06)",
+    padding: "6px 10px",
+    borderRadius: 10,
+    border: "1px solid rgba(160,120,255,0.35)",
+    background: "rgba(40,20,80,0.35)",
     color: "inherit",
     outline: "none",
   },
+
   loginBtn: {
-    padding: "8px 12px",
-    borderRadius: 12,
+    padding: "6px 12px",
+    borderRadius: 10,
     border: "1px solid rgba(255,255,255,0.12)",
     background: "rgba(255,255,255,0.06)",
     color: "inherit",

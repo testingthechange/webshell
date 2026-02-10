@@ -1,14 +1,84 @@
+// FILE: src/routes/Checkout.jsx
 import { useEffect, useMemo, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { loadManifest } from "../lib/loadManifest.js";
+
+const COLLECTION_KEY = "bb_collection_v1";
+
+function safeString(v) {
+  return String(v ?? "").trim();
+}
+
+function safeParse(json) {
+  try {
+    return JSON.parse(json);
+  } catch {
+    return null;
+  }
+}
+
+function readCollectionRaw() {
+  try {
+    const raw = localStorage.getItem(COLLECTION_KEY);
+    const parsed = raw ? safeParse(raw) : null;
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+// helps if older shapes ever existed
+function loadCollectionIds() {
+  const parsed = readCollectionRaw();
+  const out = [];
+
+  for (const x of parsed) {
+    if (!x) continue;
+    if (typeof x === "string") out.push(safeString(x));
+    else out.push(safeString(x?.shareId || x?.id || x?.share_id || x?.shareID || ""));
+  }
+
+  const seen = new Set();
+  const deduped = [];
+  for (const id of out) {
+    const v = safeString(id);
+    if (!v || seen.has(v)) continue;
+    seen.add(v);
+    deduped.push(v);
+  }
+  return deduped;
+}
+
+function saveCollectionIds(ids) {
+  const cleaned = [];
+  const seen = new Set();
+  for (const x of ids || []) {
+    const id = safeString(x);
+    if (!id || seen.has(id)) continue;
+    seen.add(id);
+    cleaned.push(id);
+  }
+  try {
+    localStorage.setItem(COLLECTION_KEY, JSON.stringify(cleaned));
+  } catch {}
+  return cleaned;
+}
+
+function ensureShareIdInCollection(shareId) {
+  const id = safeString(shareId);
+  if (!id) return [];
+  const existing = loadCollectionIds();
+  const next = [id, ...existing.filter((x) => x !== id)];
+  return saveCollectionIds(next);
+}
 
 /**
  * Fake checkout (beta)
  * - No payments
  * - On complete:
  *   1) marks mock_owned:<shareId>=1
- *   2) upserts album entry into mock_library (My Collection)
- *   3) redirects to /account/:shareId
+ *   2) upserts shareId into bb_collection_v1 (My Collection)
+ *   3) redirects to /account/:shareId?purchased=1
  */
 export default function Checkout() {
   const { shareId = "" } = useParams();
@@ -36,42 +106,27 @@ export default function Checkout() {
     };
   }, [shareId]);
 
-  function upsertLibraryEntry() {
-    if (!shareId) return;
-
-    const title = manifest?.title || manifest?.album?.title || "Album";
-    const artist = manifest?.artist || manifest?.album?.artist || "";
-    const coverUrl = manifest?.coverUrl || manifest?.album?.coverUrl || "";
-    const purchasedAt = new Date().toISOString();
-
-    const entry = { shareId, title, artist, coverUrl, purchasedAt };
-
-    try {
-      const raw = localStorage.getItem("mock_library");
-      const list = Array.isArray(JSON.parse(raw || "[]")) ? JSON.parse(raw || "[]") : [];
-
-      const idx = list.findIndex((x) => x?.shareId === shareId);
-      if (idx >= 0) list[idx] = { ...list[idx], ...entry };
-      else list.unshift(entry);
-
-      localStorage.setItem("mock_library", JSON.stringify(list));
-    } catch {
-      // ignore
-    }
-  }
-
   function completePurchase() {
     if (!shareId) {
       nav("/account");
       return;
     }
 
+    // (1) REQUIRED: owned flag
     try {
       localStorage.setItem(ownedKey, "1");
     } catch {}
 
-    upsertLibraryEntry();
-    nav(`/account/${shareId}?purchased=1`);
+    // (2) REQUIRED: collection list
+    ensureShareIdInCollection(shareId);
+
+    // (3) OPTIONAL: session receipt (lets Account self-heal if query drops)
+    try {
+      sessionStorage.setItem("bb_last_purchase_v1", JSON.stringify({ shareId, ts: Date.now() }));
+    } catch {}
+
+    // (4) redirect
+    nav(`/account/${shareId}?purchased=1`, { replace: true });
   }
 
   const title = manifest?.title || manifest?.album?.title || "Checkout";
@@ -79,15 +134,9 @@ export default function Checkout() {
   return (
     <div style={{ width: "70%", maxWidth: 980, margin: "0 auto", padding: "28px 0" }}>
       <div style={{ fontWeight: 900, fontSize: 22, marginBottom: 6 }}>Checkout</div>
-      <div style={{ opacity: 0.75, marginBottom: 18 }}>
-        Fake checkout (beta). No payment processed.
-      </div>
+      <div style={{ opacity: 0.75, marginBottom: 18 }}>Fake checkout (beta). No payment processed.</div>
 
-      {error ? (
-        <div style={{ marginBottom: 16, opacity: 0.85 }}>
-          {error}
-        </div>
-      ) : null}
+      {error ? <div style={{ marginBottom: 16, opacity: 0.85 }}>{error}</div> : null}
 
       <div
         style={{

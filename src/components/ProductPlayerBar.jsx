@@ -1,3 +1,4 @@
+// src/components/ProductPlayerBar.jsx
 import { useEffect, useRef, useState } from "react";
 import { formatDuration } from "../lib/loadManifest.js";
 
@@ -17,7 +18,7 @@ export default function ProductPlayerBar({
   isPlaying,
   currentTime,
   duration,
-  playbackMode,
+  playbackMode, // "preview" | "full"
   onPlay,
   onPause,
   onTimeUpdate,
@@ -34,18 +35,63 @@ export default function ProductPlayerBar({
 
   const [playError, setPlayError] = useState("");
 
+  // Keep latest callbacks + playing state stable for event listeners
+  const cbRef = useRef({
+    onPlay: null,
+    onPause: null,
+    onTimeUpdate: null,
+    onDurationChange: null,
+    onTrackEnd: null,
+  });
+  const playRef = useRef(false);
+
+  useEffect(() => {
+    cbRef.current.onPlay = onPlay;
+    cbRef.current.onPause = onPause;
+    cbRef.current.onTimeUpdate = onTimeUpdate;
+    cbRef.current.onDurationChange = onDurationChange;
+    cbRef.current.onTrackEnd = onTrackEnd;
+    playRef.current = !!isPlaying;
+  });
+
+  // HARD GUARD: allow only ONE end-signal per track, with cooldown
+  const endFiredRef = useRef(false);
+  const lastTrackKeyRef = useRef("");
+  const lastEndAtRef = useRef(0);
+
+  // AUTOPLAY GUARD: ensure the newly-loaded track actually starts playing
+  const autoplayTokenRef = useRef(0);
+
+  const trackKey = String(
+    currentTrack?.id || currentTrack?.s3Key || currentTrack?.playbackUrl || currentTrack?.url || ""
+  );
+
+  useEffect(() => {
+    // reset end guard when track changes
+    if (trackKey && trackKey !== lastTrackKeyRef.current) {
+      lastTrackKeyRef.current = trackKey;
+      endFiredRef.current = false;
+    }
+  }, [trackKey]);
+
+  const fireTrackEndOnce = () => {
+    const now = Date.now();
+    if (endFiredRef.current) return;
+    if (now - lastEndAtRef.current < 350) return; // cooldown prevents rapid cascades
+    endFiredRef.current = true;
+    lastEndAtRef.current = now;
+    cbRef.current.onTrackEnd?.();
+  };
+
   const maxDuration =
     playbackMode === "preview"
       ? Math.min(duration || PREVIEW_CAP_SECONDS, PREVIEW_CAP_SECONDS)
       : duration || 0;
 
   const remaining =
-    playbackMode === "preview"
-      ? Math.max(0, PREVIEW_CAP_SECONDS - currentTime)
-      : 0;
+    playbackMode === "preview" ? Math.max(0, PREVIEW_CAP_SECONDS - currentTime) : 0;
 
-  const progressPercent =
-    maxDuration > 0 ? clamp((currentTime / maxDuration) * 100, 0, 100) : 0;
+  const progressPercent = maxDuration > 0 ? clamp((currentTime / maxDuration) * 100, 0, 100) : 0;
 
   function ensureAudible() {
     const audio = actualRef.current;
@@ -54,37 +100,64 @@ export default function ProductPlayerBar({
     audio.volume = 1;
   }
 
-  useEffect(() => {
-    ensureAudible();
-  }, [actualRef, currentTrack?.id]);
-
+  // Resolve playable URL when track changes
   useEffect(() => {
     const audio = actualRef.current;
     if (!audio) return;
 
     let cancelled = false;
 
+    const tryAutoPlayForThisLoad = () => {
+      // only autoplay if parent says we are playing
+      if (!playRef.current) return;
+
+      const token = ++autoplayTokenRef.current;
+
+      const attempt = () => {
+        // ignore if a newer load happened
+        if (token !== autoplayTokenRef.current) return;
+        ensureAudible();
+        audio.play().catch(() => {
+          // if blocked, do not spam; user can press play once
+        });
+      };
+
+      // best effort: immediately + once canplay fires
+      window.setTimeout(attempt, 0);
+
+      const onCanPlay = () => {
+        audio.removeEventListener("canplay", onCanPlay);
+        audio.removeEventListener("loadedmetadata", onCanPlay);
+        attempt();
+      };
+
+      audio.addEventListener("canplay", onCanPlay);
+      audio.addEventListener("loadedmetadata", onCanPlay);
+    };
+
     (async () => {
       try {
         setPlayError("");
 
         if (!currentTrack) {
+          try {
+            audio.pause();
+          } catch {}
           audio.removeAttribute("src");
           audio.load();
-          onPause?.();
-          onTimeUpdate?.(0);
-          onDurationChange?.(0);
+          cbRef.current.onPause?.();
+          cbRef.current.onTimeUpdate?.(0);
+          cbRef.current.onDurationChange?.(0);
           return;
         }
 
-        const directUrl =
-          String(
-            currentTrack.playbackUrl ||
-              currentTrack.url ||
-              currentTrack.audioUrl ||
-              currentTrack.src ||
-              ""
-          ).trim();
+        const directUrl = String(
+          currentTrack.playbackUrl ||
+            currentTrack.url ||
+            currentTrack.audioUrl ||
+            currentTrack.src ||
+            ""
+        ).trim();
 
         let finalUrl = directUrl;
 
@@ -105,12 +178,27 @@ export default function ProductPlayerBar({
 
         if (cancelled) return;
 
+        // Swap source safely
         if (audio.src !== finalUrl) {
-          audio.src = finalUrl;
-          audio.currentTime = 0;
-          onTimeUpdate?.(0);
+          try {
+            audio.pause();
+          } catch {}
+
+          try {
+            audio.currentTime = 0;
+          } catch {}
+
+          cbRef.current.onTimeUpdate?.(0);
           ensureAudible();
+
+          audio.src = finalUrl;
           audio.load();
+
+          // ✅ critical: after changing src due to auto-advance, actually start the next track
+          tryAutoPlayForThisLoad();
+        } else {
+          // If src didn't change but we're supposed to be playing, ensure it's playing
+          tryAutoPlayForThisLoad();
         }
       } catch (e) {
         if (!cancelled) setPlayError(String(e?.message || e));
@@ -120,60 +208,84 @@ export default function ProductPlayerBar({
     return () => {
       cancelled = true;
     };
-  }, [currentTrack?.id, currentTrack?.s3Key]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentTrack?.id, currentTrack?.s3Key, currentTrack?.playbackUrl, currentTrack?.url]);
 
+  // Attach audio listeners ONCE (uses refs to stay current)
   useEffect(() => {
     const audio = actualRef.current;
     if (!audio) return;
 
     const onLoadedMetadata = () => {
-      onDurationChange?.(Number.isFinite(audio.duration) ? audio.duration : 0);
+      cbRef.current.onDurationChange?.(Number.isFinite(audio.duration) ? audio.duration : 0);
     };
 
     const onTime = () => {
       const t = audio.currentTime || 0;
-      onTimeUpdate?.(t);
+      cbRef.current.onTimeUpdate?.(t);
 
-      if (playbackMode === "preview" && t >= PREVIEW_CAP_SECONDS) {
-        audio.pause();
-        audio.currentTime = PREVIEW_CAP_SECONDS;
-        onPause?.();
-        onTrackEnd?.();
+      // PREVIEW CAP: only while actively playing; fire once
+      if (playbackMode === "preview" && playRef.current) {
+        if (t >= PREVIEW_CAP_SECONDS - 0.05) {
+          try {
+            audio.pause();
+          } catch {}
+          try {
+            audio.currentTime = 0;
+          } catch {}
+          cbRef.current.onTimeUpdate?.(0);
+          fireTrackEndOnce();
+        }
       }
+    };
+
+    const onEnded = () => {
+      // Natural end: ignore “ended” that fires immediately during src swaps
+      if (!playRef.current) return;
+      if ((audio.currentTime || 0) < 0.25) return;
+      fireTrackEndOnce();
     };
 
     audio.addEventListener("loadedmetadata", onLoadedMetadata);
     audio.addEventListener("timeupdate", onTime);
+    audio.addEventListener("ended", onEnded);
 
     return () => {
       audio.removeEventListener("loadedmetadata", onLoadedMetadata);
       audio.removeEventListener("timeupdate", onTime);
+      audio.removeEventListener("ended", onEnded);
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [actualRef, playbackMode]);
 
+  // Drive actual play/pause from isPlaying
   useEffect(() => {
     const audio = actualRef.current;
     if (!audio) return;
 
+    ensureAudible();
+
     if (!currentTrack) {
-      audio.pause();
+      try {
+        audio.pause();
+      } catch {}
       return;
     }
 
     if (isPlaying) {
-      ensureAudible();
       audio.play().catch(() => {
-        onPause?.();
+        cbRef.current.onPause?.();
       });
     } else {
       audio.pause();
     }
-  }, [isPlaying, currentTrack?.id]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isPlaying, currentTrack?.id, currentTrack?.s3Key]);
 
   const togglePlayPause = () => {
     if (!currentTrack) return;
     ensureAudible();
-    isPlaying ? onPause?.() : onPlay?.();
+    isPlaying ? cbRef.current.onPause?.() : cbRef.current.onPlay?.();
   };
 
   const handleProgressClick = (e) => {
@@ -188,16 +300,11 @@ export default function ProductPlayerBar({
     <div style={{ display: "flex", flexDirection: "column" }}>
       <audio ref={actualRef} preload="metadata" />
 
-      {/* CONTROLS — moved DOWN */}
-      <div
-        style={{
-          display: "flex",
-          justifyContent: "center",
-          gap: 10,
-          marginBottom: 6,   // ↓ brings controls closer to bar
-        }}
-      >
-        <button onClick={onPrev} disabled={!hasPrev} style={smallBtn}>⏮</button>
+      {/* CONTROLS (NO REPEAT / SHUFFLE) */}
+      <div style={{ display: "flex", justifyContent: "center", gap: 10, marginBottom: 6 }}>
+        <button onClick={onPrev} disabled={!hasPrev} style={smallBtn}>
+          ⏮
+        </button>
 
         <button
           onClick={togglePlayPause}
@@ -214,24 +321,17 @@ export default function ProductPlayerBar({
           {isPlaying ? "❚❚" : "▶"}
         </button>
 
-        <button onClick={onNext} disabled={!hasNext} style={smallBtn}>⏭</button>
+        <button onClick={onNext} disabled={!hasNext} style={smallBtn}>
+          ⏭
+        </button>
       </div>
 
       {/* NOW PLAYING */}
       <div style={{ fontSize: 12, marginBottom: 4 }}>
-        <div
-          style={{
-            fontSize: 11,
-            letterSpacing: 0.6,
-            textTransform: "uppercase",
-            opacity: 0.7,
-          }}
-        >
+        <div style={{ fontSize: 11, letterSpacing: 0.6, textTransform: "uppercase", opacity: 0.7 }}>
           Now Playing
         </div>
-        <div style={{ fontWeight: 700 }}>
-          {currentTrack?.title || currentTrack?.name || "—"}
-        </div>
+        <div style={{ fontWeight: 700 }}>{currentTrack?.title || currentTrack?.name || "—"}</div>
       </div>
 
       {/* PROGRESS BAR */}
@@ -259,26 +359,14 @@ export default function ProductPlayerBar({
       </div>
 
       {/* TIME */}
-      <div
-        style={{
-          display: "flex",
-          justifyContent: "space-between",
-          fontSize: 12,
-          opacity: 0.85,
-          marginTop: 2,
-        }}
-      >
+      <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12, opacity: 0.85, marginTop: 2 }}>
         <div>
           {formatDuration(currentTime)} / {formatDuration(maxDuration)}
         </div>
-        {playbackMode === "preview" && (
-          <div>Preview remaining: {formatDuration(remaining)}</div>
-        )}
+        {playbackMode === "preview" ? <div>Preview remaining: {formatDuration(remaining)}</div> : <div />}
       </div>
 
-      {playError ? (
-        <div style={{ fontSize: 12, opacity: 0.7 }}>{playError}</div>
-      ) : null}
+      {playError ? <div style={{ fontSize: 12, opacity: 0.7 }}>{playError}</div> : null}
     </div>
   );
 }
